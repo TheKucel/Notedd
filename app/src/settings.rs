@@ -6,10 +6,10 @@ use crate::locale::Language;
 use windows::core::{w, PCWSTR};
 use windows::Win32::System::Registry::*;
 
-/// key bindings: 0 show/hide (global), 1 new note (global), 2 new note, 3 all notes, 4 find, 5 settings, 6 pin, 7 quit, 8 note colour, 9 delete note
-pub const KEYS: usize = 10;
+/// key bindings: 0 show/hide (global), 1 new note (global), 2 new note, 3 all notes, 4 find, 5 settings, 6 pin, 7 quit, 8 note colour, 9 delete note, 10 highlight
+pub const KEYS: usize = 11;
 pub const MAX_CARDS: usize = 10;
-pub const DEFAULT_KEYS: [(u32, u32); KEYS] = [(3, 0x20), (3, 0x4E), (2, 0x4E), (2, 0x50), (2, 0x46), (2, 0xBC), (2, 0x54), (2, 0x51), (6, 0x43), (6, 0x2E)];
+pub const DEFAULT_KEYS: [(u32, u32); KEYS] = [(3, 0x20), (3, 0x4E), (2, 0x4E), (2, 0x50), (2, 0x46), (2, 0xBC), (2, 0x54), (2, 0x51), (6, 0x43), (6, 0x2E), (6, 0x48)];
 /// card colours per theme kind: 0 paper, 1 night, 2 custom
 pub const DEFAULT_CARDS: [[u32; MAX_CARDS]; 3] = [
     [0xefebe3, 0xdde3d2, 0xd8e0e2, 0xe2dbe8, 0xefdcd4, 0xeee1c5, 0xd9e4ea, 0xe6e6dc, 0xe9dde3, 0xe0e7dc],
@@ -21,6 +21,7 @@ pub const DEFAULT_CARDS: [[u32; MAX_CARDS]; 3] = [
 pub struct Prefs {
     /// None follows the Windows display language.
     pub language: Option<Language>,
+    pub simple_editor: bool,
     /// 0 paper, 1 night, 2 follow Windows, 3 custom
     pub theme: u8,
     /// text size, percent
@@ -44,7 +45,7 @@ pub struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Prefs {
-        Prefs { language: None, theme: 0, scale: 100, dir: 0, far: false, speed: 1, keys: DEFAULT_KEYS, cards: DEFAULT_CARDS, ncards: 6, ink: [None; 3], accent: [None; 3] }
+        Prefs { language: None, simple_editor: false, theme: 0, scale: 100, dir: 0, far: false, speed: 1, keys: DEFAULT_KEYS, cards: DEFAULT_CARDS, ncards: 6, ink: [None; 3], accent: [None; 3] }
     }
 }
 
@@ -94,6 +95,7 @@ pub fn load() -> Prefs {
         let idx = |pre: &str, max: usize| k.strip_prefix(pre).and_then(|r| r.parse::<usize>().ok()).filter(|&i| i < max);
         match k {
             "language" => p.language = Language::from_tag(v),
+            "editor" => p.simple_editor = v == "simple",
             "theme" => p.theme = (n as u8).min(3),
             "scale" => p.scale = n.clamp(80, 160),
             "dir" => p.dir = (n as u8).min(4),
@@ -119,7 +121,8 @@ pub fn load() -> Prefs {
 
 pub fn save(p: &Prefs) {
     let language = p.language.map_or("system", Language::tag);
-    let mut s = format!("language={language}\ntheme={}\nscale={}\ndir={}\nfar={}\nspeed={}\n", p.theme, p.scale, p.dir, p.far as u8, p.speed);
+    let editor = if p.simple_editor { "simple" } else { "markdown" };
+    let mut s = format!("language={language}\neditor={editor}\ntheme={}\nscale={}\ndir={}\nfar={}\nspeed={}\n", p.theme, p.scale, p.dir, p.far as u8, p.speed);
     for (i, (m, vk)) in p.keys.iter().enumerate() { s += &format!("key{i}={m},{vk}\n"); }
     s += &format!("ncards={}\n", p.ncards);
     let h = |c: Option<u32>| c.map(|c| format!("{c:06x}")).unwrap_or_default();

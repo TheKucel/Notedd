@@ -43,7 +43,7 @@ const VERSION: &str = "1.0.0";
 
 // ---- geometry, DIPs ----
 const W: f32 = 640.0;
-const H: f32 = 480.0;
+const H: f32 = 504.0;
 const M: f32 = 64.0; // room around the card for its shadow and the finale's fan
 const STACK: f32 = 44.0; // room above the card for the edges of the notes under it
 const OX: f32 = M;
@@ -56,6 +56,8 @@ const RT: f32 = 14.0;
 const PAD: f32 = 56.0;
 const TOP: f32 = T + 54.0;
 const BTN_H: f32 = 44.0;
+const CONTROL_GAP: f32 = 16.0;
+const KEY_CHANGE_GAP: f32 = 12.0;
 const X2: f32 = R + G + F;
 
 // ---- the setup is always on paper ----
@@ -115,7 +117,7 @@ struct Card { cur: V, to: V, delay: f32 }
 
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Hit { Primary, Secondary, Close, Theme(usize), Keys, Auto, Desktop, NotesDir, AppDir, Language(usize) }
+enum Hit { Primary, Secondary, Close, Theme(usize), Editor(bool), Keys, Auto, Desktop, NotesDir, AppDir, LanguageMenu, Language(usize) }
 
 struct Fonts { big: IDWriteTextFormat, title: IDWriteTextFormat, sub: IDWriteTextFormat, subc: IDWriteTextFormat, label: IDWriteTextFormat, small: IDWriteTextFormat, btn: IDWriteTextFormat, cap: IDWriteTextFormat, tab: IDWriteTextFormat, titlec: IDWriteTextFormat, aa: IDWriteTextFormat }
 
@@ -138,6 +140,8 @@ struct Setup {
     intro_wait: f32,
     theme: usize,
     theme0: usize,
+    simple_editor: bool,
+    editor_pill: Ease,
     /// the user's own palette from the app (theme 3): paper, card, text
     custom: Option<[u32; 3]>,
     /// how picked each theme tile looks
@@ -161,7 +165,8 @@ struct Setup {
     hover: Option<Hit>,
     press: Option<Hit>,
     language: Option<Language>,
-    hover_k: [Ease; 10 + Language::ALL.len()],
+    language_menu: Option<usize>,
+    hover_k: [Ease; 13 + Language::ALL.len()],
     tick: Instant,
     animating: bool,
 }
@@ -281,17 +286,20 @@ unsafe fn shortcut(lnk: &Path, target: &Path, icon: &Path) -> Result<()> {
     Ok(())
 }
 /// the settings file keeps everything the app wrote; only the chosen bits change
-fn write_settings(theme: Option<usize>, keys: (u32, u32), notes: &Path, language: Option<Language>) -> std::io::Result<()> {
+fn write_settings(theme: Option<usize>, simple_editor: bool, keys: (u32, u32), notes: &Path, language: Option<Language>) -> std::io::Result<()> {
     let file = settings_file();
     std::fs::create_dir_all(file.parent().unwrap())?;
     let old = old_settings();
     let mut out: String = old.lines()
         .filter(|l| !["key0=", "hk_mods=", "hk_vk=", "notes_dir="].iter().any(|k| l.starts_with(k))
             && !(theme.is_some() && l.starts_with("theme="))
-            && !(language.is_some() && l.starts_with("language=")))
+            && !(language.is_some() && l.starts_with("language="))
+            && !l.split_once('=').is_some_and(|(key, _)| key.trim() == "editor"))
         .map(|l| format!("{l}\n")).collect();
     if let Some(t) = theme { out += &format!("theme={t}\n"); }
     if let Some(lang) = language { out += &format!("language={}\n", lang.tag()); }
+    let editor = if simple_editor { "simple" } else { "markdown" };
+    out += &format!("editor={editor}\n");
     out += &format!("key0={},{}\nnotes_dir={}\n", keys.0, keys.1, notes.display());
     std::fs::write(file, out)
 }
@@ -327,7 +335,8 @@ unsafe fn install(s: &Setup) -> std::result::Result<(), String> {
             }
         }
     }
-    write_settings((s.theme != s.theme0).then_some(s.theme), s.keys, &s.notes_dir, s.language).map_err(|e| format!("{}: {e}", ui::SAVE_SETTINGS.get()))?;
+    write_settings((s.theme != s.theme0).then_some(s.theme), s.simple_editor, s.keys, &s.notes_dir, s.language)
+        .map_err(|e| format!("{}: {e}", ui::SAVE_SETTINGS.get()))?;
 
     let programs = known(&FOLDERID_Programs);
     let _ = shortcut(&programs.join("Notedd.lnk"), &exe, &icon);
@@ -431,16 +440,39 @@ impl Setup {
     fn btn_y(&self) -> f32 { H - 36.0 - BTN_H }
     unsafe fn tiles(&self) -> (Vec<D2D_RECT_F>, f32) {
         let n = 3;
-        let gap = 18.0;
+        let gap = 26.0;
         let tw = (W - 2.0 * PAD - gap * (n - 1) as f32) / n as f32;
         let y = TOP + 112.0;
-        ((0..n).map(|i| { let x = PAD + i as f32 * (tw + gap); rect(x, y, x + tw, y + 112.0) }).collect(), 1.0)
+        ((0..n).map(|i| { let x = PAD + i as f32 * (tw + gap); rect(x, y, x + tw, y + 100.0) }).collect(), 1.0)
+    }
+    unsafe fn editor_choices(&self) -> [(bool, &'static str, D2D_RECT_F); 2] {
+        let labels = ["Markdown", ui::SIMPLE.get()];
+        let cell = labels.iter().map(|s| self.text_w(s, &self.fonts.btn)).fold(0.0, f32::max).ceil() + 38.0;
+        let top = self.btn_y() - BTN_H - 20.0;
+        let mid = W - PAD - cell;
+        [(false, labels[0], rect(mid - cell, top, mid, top + BTN_H)),
+         (true, labels[1], rect(mid, top, mid + cell, top + BTN_H))]
+    }
+    fn language_button(&self) -> D2D_RECT_F {
+        let y = self.btn_y();
+        rect(PAD, y, PAD + BTN_H, y + BTN_H)
+    }
+    fn language_panel(&self) -> D2D_RECT_F {
+        let bottom = self.btn_y() - 10.0;
+        rect(PAD, bottom - 12.0 - 36.0 * Language::ALL.len() as f32, PAD + 166.0, bottom)
+    }
+    fn language_rows(&self) -> [D2D_RECT_F; Language::ALL.len()] {
+        let panel = self.language_panel();
+        std::array::from_fn(|i| {
+            let y = panel.top + 6.0 + i as f32 * 36.0;
+            rect(panel.left + 6.0, y, panel.right - 6.0, y + 36.0)
+        })
     }
     unsafe fn change_w(&self) -> f32 { self.text_w(ui::CHANGE.get(), &self.fonts.btn) + 44.0 }
     unsafe fn caps_width(&self) -> f32 {
         key_parts(self.keys.0, self.keys.1).iter().map(|k| self.text_w(k, &self.fonts.cap).max(16.0) + 30.0 + 8.0).sum::<f32>()
     }
-    fn row_y(i: usize) -> f32 { TOP + 110.0 + 74.0 * i as f32 }
+    fn row_y(i: usize) -> f32 { TOP + 110.0 + 80.0 * i as f32 }
 
     /// what can be pressed on a page
     unsafe fn hits(&self, page: usize) -> Vec<(Hit, D2D_RECT_F)> {
@@ -459,16 +491,20 @@ impl Setup {
         if self.uninstall { return v; }
         match page {
             0 => {
-                let mut x = PAD - 20.0;
-                for (i, lang) in Language::ALL.into_iter().enumerate() {
-                    let w = self.text_w(lang.name(), &self.fonts.btn) + 30.0;
-                    v.push((Hit::Language(i), rect(x, by, x + w, by + BTN_H)));
-                    x += w + 4.0;
+                v.push((Hit::LanguageMenu, self.language_button()));
+                if self.page == 0 && self.language_menu.is_some() {
+                    v.extend(self.language_rows().into_iter().enumerate().map(|(i, r)| (Hit::Language(i), r)));
                 }
             }
-            1 => { let (tiles, _) = self.tiles(); for (i, r) in tiles.into_iter().enumerate() { v.push((Hit::Theme(i), rect(r.left - 4.0, r.top - 4.0, r.right + 4.0, r.bottom + 36.0))); } }
+            1 => {
+                let (tiles, _) = self.tiles();
+                for (i, r) in tiles.into_iter().enumerate() {
+                    v.push((Hit::Theme(i), rect(r.left - 4.0, r.top - 4.0, r.right + 4.0, r.bottom + 36.0)));
+                }
+                v.extend(self.editor_choices().map(|(simple, _, r)| (Hit::Editor(simple), r)));
+            }
             2 => {
-                let x = PAD + self.caps_width() + 8.0;
+                let x = PAD + self.caps_width() + KEY_CHANGE_GAP;
                 v.push((Hit::Keys, rect(x, TOP + 110.0, x + self.change_w(), TOP + 154.0)));
                 v.push((Hit::Auto, rect(PAD - 8.0, TOP + 196.0, W - PAD + 8.0, TOP + 246.0)));
             }
@@ -497,7 +533,7 @@ impl Setup {
     }
     unsafe fn hit_at(&self, x: f32, y: f32) -> Option<Hit> {
         if self.working { return None; }
-        self.hits(self.page).into_iter().find(|(_, r)| inside(r, x, y)).map(|(h, _)| h)
+        self.hits(self.page).into_iter().find(|(_, r)| x < r.right && inside(r, x, y)).map(|(h, _)| h)
     }
 
     // ---------- actions ----------
@@ -513,6 +549,7 @@ impl Setup {
     unsafe fn go(&mut self, page: usize) {
         self.page = page.min(self.pages() - 1);
         self.capturing = false;
+        self.language_menu = None;
         self.hover = None;
         self.layout();
     }
@@ -521,13 +558,22 @@ impl Setup {
             Hit::Close => { if !self.working { let _ = DestroyWindow(self.hwnd); } }
             Hit::Primary => self.primary(),
             Hit::Secondary => self.secondary(),
+            Hit::LanguageMenu => {
+                self.language_menu = if self.language_menu.is_some() { None } else { Some(locale::current() as usize) };
+            }
             Hit::Language(i) => {
                 self.language = Some(Language::ALL[i]);
                 locale::set(self.language);
+                self.language_menu = None;
                 let title = wide(ui::INSTALL_TITLE.get());
                 let _ = SetWindowTextW(self.hwnd, PCWSTR(title.as_ptr()));
             }
             Hit::Theme(i) => { self.theme = i; self.start_anim(); }
+            Hit::Editor(simple) => {
+                self.simple_editor = simple;
+                self.editor_pill.to = f32::from(u8::from(simple));
+                self.start_anim();
+            }
             Hit::Keys => { self.capturing = !self.capturing; }
             Hit::Auto => { self.autostart = !self.autostart; self.sw[0].to = self.autostart as u8 as f32; self.start_anim(); }
             Hit::Desktop => { self.desktop = !self.desktop; self.sw[1].to = self.desktop as u8 as f32; self.start_anim(); }
@@ -589,6 +635,19 @@ impl Setup {
     unsafe fn key(&mut self, vk: u32) {
         if self.capturing { self.capture(vk); return; }
         if self.working { return; }
+        if let Some(i) = self.language_menu {
+            let n = Language::ALL.len();
+            match VIRTUAL_KEY(vk as u16) {
+                VK_ESCAPE | VK_TAB => self.language_menu = None,
+                VK_UP => self.language_menu = Some((i + n - 1) % n),
+                VK_DOWN => self.language_menu = Some((i + 1) % n),
+                VK_RETURN | VK_SPACE => self.press(Hit::Language(i)),
+                _ => return,
+            }
+            self.hover = None;
+            self.invalidate();
+            return;
+        }
         match VIRTUAL_KEY(vk as u16) {
             VK_RETURN => self.primary(),
             VK_ESCAPE => { if !self.uninstall && (1..4).contains(&self.page) { self.secondary(); } else { let _ = DestroyWindow(self.hwnd); } }
@@ -596,6 +655,8 @@ impl Setup {
                 let i = if vk == VK_LEFT.0 as u32 { self.theme.saturating_sub(1) } else { (self.theme + 1).min(self.theme_names().len() - 1) };
                 self.press(Hit::Theme(i));
             }
+            VK_UP | VK_DOWN if self.page == 1 && !self.uninstall => self.press(Hit::Editor(vk == VK_DOWN.0 as u32)),
+            VK_TAB if self.page == 0 && !self.uninstall => self.press(Hit::LanguageMenu),
             _ => {}
         }
         self.invalidate();
@@ -620,6 +681,7 @@ impl Setup {
         if self.intro_wait > 0.0 { self.intro_wait -= dt; settled = false; }
         else { self.intro.to = 1.0; settled &= self.intro.step(1.0 - (-dt * 11.0).exp(), 0.002); }
         for s in self.sw.iter_mut() { settled &= s.step(kf, 0.003); }
+        settled &= self.editor_pill.step(kf, 0.003);
         let theme = self.theme;
         for (i, e) in self.sel_k.iter_mut().enumerate() { e.to = (i == theme) as u8 as f32; settled &= e.step(kf, 0.003); }
         for (i, e) in self.hover_k.iter_mut().enumerate() { e.to = if self.hover.map_or(false, |h| hit_index(h) == i) { 1.0 } else { 0.0 }; settled &= e.step(kf, 0.01); }
@@ -784,6 +846,40 @@ impl Setup {
         t.DrawRoundedRectangle(&rrect(r.left + 0.5, r.top + 0.5, r.right - 0.5, r.bottom - 0.5, rad - 0.5), &self.brush(t, LINE, 0.22 + 0.25 * hk)?, 1.0, None);
         self.text(t, label, &self.fonts.btn, r, INK, 1.0)
     }
+    unsafe fn draw_language_menu(&self, t: &ID2D1HwndRenderTarget, r: D2D_RECT_F, o: f32) -> Result<()> {
+        let open = self.language_menu;
+        let hk = self.hk(0, Hit::LanguageMenu);
+        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        t.FillEllipse(&circle(cx, cy, BTN_H / 2.0), &self.brush(t, if open.is_some() { DARK } else { INK }, if open.is_some() { o } else { (0.04 + 0.06 * hk) * o })?);
+        t.DrawEllipse(&circle(cx, cy, BTN_H / 2.0 - 0.5), &self.brush(t, LINE, (0.24 + 0.25 * hk) * o)?, 1.0, None);
+        let globe = self.brush(t, if open.is_some() { ON } else { INK }, o)?;
+        t.DrawEllipse(&circle(cx, cy, 9.0), &globe, 1.35, None);
+        t.DrawEllipse(&D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 4.3, radiusY: 9.0 }, &globe, 1.2, None);
+        t.DrawLine(pt(cx - 8.5, cy), pt(cx + 8.5, cy), &globe, 1.2, None);
+        if let Some(focus) = open {
+            let p = self.language_panel();
+            let panel = rrect(p.left, p.top, p.right, p.bottom, 13.0);
+            self.soft_shadow(t, p, 13.0, 5.0, 12.0, 0.14)?;
+            t.FillRoundedRectangle(&panel, &self.brush(t, PAPER, 1.0)?);
+            t.DrawRoundedRectangle(&panel, &self.brush(t, LINE, 0.24)?, 1.0, None);
+            for (i, (lang, row)) in Language::ALL.into_iter().zip(self.language_rows()).enumerate() {
+                let current = locale::current() == lang;
+                let hot = if matches!(self.hover, Some(Hit::Language(_))) { self.hover == Some(Hit::Language(i)) } else { i == focus };
+                if hot {
+                    t.FillRoundedRectangle(&rrect(row.left, row.top, row.right, row.bottom, 8.0), &self.brush(t, INK, 0.08)?);
+                }
+                self.text(t, lang.name(), &self.fonts.btn, rect(row.left, row.top, row.right - 20.0, row.bottom), INK, 1.0)?;
+                if current {
+                    let x = row.right - 16.0;
+                    let y = (row.top + row.bottom) / 2.0;
+                    let b = self.brush(t, INK, 1.0)?;
+                    t.DrawLine(pt(x - 5.0, y), pt(x - 1.5, y + 3.5), &b, 1.5, &self.round);
+                    t.DrawLine(pt(x - 1.5, y + 3.5), pt(x + 5.0, y - 4.0), &b, 1.5, &self.round);
+                }
+            }
+        }
+        Ok(())
+    }
     unsafe fn switch(&self, t: &ID2D1HwndRenderTarget, p: usize, r: D2D_RECT_F, label: &str, note: &str, i: usize, h: Hit, bg: u32) -> Result<()> {
         let v = self.sw[i].v;
         let hk = self.hk(p, h);
@@ -857,6 +953,22 @@ impl Setup {
                         let fnt = &self.fonts.btn;
                         self.text(t, name, fnt, rect(r.left - 8.0, r.bottom + 10.0, r.right + 8.0, r.bottom + 34.0), mix(INK2, INK, sel.max(hk)), 1.0)?;
                     }
+                    let choices = self.editor_choices();
+                    let r = choices[0].2;
+                    let right = r.left - CONTROL_GAP;
+                    self.text(t, ui::EDITOR.get(), &self.fonts.label, rect(PAD, r.top, right, r.top + 23.0), INK, 1.0)?;
+                    let hint = if self.simple_editor { ui::SIMPLE_HELP.get() } else { ui::MARKDOWN_HELP.get() };
+                    self.text(t, hint, &self.fonts.small, rect(PAD, r.top + 23.0, right, r.bottom), INK2, 1.0)?;
+                    let shell = rrect(r.left, r.top, choices[1].2.right, r.bottom, BTN_H / 2.0);
+                    t.FillRoundedRectangle(&shell, &self.brush(t, INK, 0.05)?);
+                    t.DrawRoundedRectangle(&shell, &self.brush(t, LINE, 0.35)?, 1.0, None);
+                    let slide = self.editor_pill.v;
+                    let x = r.left + (r.right - r.left) * slide;
+                    t.FillRoundedRectangle(&rrect(x + 3.0, r.top + 3.0, x + r.right - r.left - 3.0, r.bottom - 3.0, BTN_H / 2.0 - 3.0), &self.brush(t, DARK, 1.0)?);
+                    for (simple, label, r) in choices {
+                        let base = mix(INK2, INK, self.hk(p, Hit::Editor(simple)));
+                        self.text(t, label, &self.fonts.btn, r, mix(base, ON, if simple { slide } else { 1.0 - slide }), 1.0)?;
+                    }
                 }
                 2 => {
                     self.text(t, ui::SHORTCUT.get(), &self.fonts.title, title_r, INK, 1.0)?;
@@ -870,7 +982,7 @@ impl Setup {
                         self.text(t, ui::PRESS_SHORTCUT.get(), &self.fonts.label, rect(PAD + 18.0, y, PAD + w, y + BTN_H), INK, 1.0)?;
                         self.text(t, ui::ESC_CANCEL.get(), &self.fonts.small, rect(PAD + w + 16.0, y, W - PAD, y + BTN_H), INK2, 1.0)?;
                     } else {
-                        let x = self.keycaps(t, PAD, y, bg)? + 8.0;
+                        let x = self.keycaps(t, PAD, y, bg)? + KEY_CHANGE_GAP;
                         self.pill(t, p, Hit::Keys, rect(x, y, x + self.change_w(), y + BTN_H), ui::CHANGE.get(), bg)?;
                     }
                     self.switch(t, p, rect(PAD - 8.0, TOP + 196.0, W - PAD + 8.0, TOP + 246.0), ui::AUTOSTART.get(), ui::AUTOSTART_HELP.get(), 0, Hit::Auto, bg)?;
@@ -922,10 +1034,7 @@ impl Setup {
             match h {
                 Hit::Primary => self.button(t, p, h, r, &self.primary_label(p), true, if p == 4 && self.done { ((self.done_t - 0.7) / 0.4).clamp(0.0, 1.0) } else { bo })?,
                 Hit::Secondary => self.button(t, p, h, r, &self.secondary_label(p), false, if p == 4 && self.done { ((self.done_t - 0.7) / 0.4).clamp(0.0, 1.0) } else { bo })?,
-                Hit::Language(i) => {
-                    let lang = Language::ALL[i];
-                    self.button(t, p, h, r, lang.name(), locale::current() == lang, bo)?;
-                }
+                Hit::LanguageMenu => self.draw_language_menu(t, r, bo)?,
                 _ => {}
             }
         }
@@ -951,7 +1060,7 @@ impl Setup {
     }
 }
 fn hit_index(h: Hit) -> usize {
-    match h { Hit::Primary => 0, Hit::Secondary => 1, Hit::Close => 2, Hit::Theme(i) => 3 + i.min(3), Hit::Keys => 7, Hit::Auto | Hit::NotesDir => 8, Hit::Desktop | Hit::AppDir => 9, Hit::Language(i) => 10 + i }
+    match h { Hit::Primary => 0, Hit::Secondary => 1, Hit::Close => 2, Hit::Theme(i) => 3 + i.min(3), Hit::Keys => 7, Hit::Auto | Hit::NotesDir => 8, Hit::Desktop | Hit::AppDir => 9, Hit::Language(i) => 10 + i, Hit::Editor(simple) => 10 + Language::ALL.len() + usize::from(simple), Hit::LanguageMenu => 12 + Language::ALL.len() }
 }
 
 fn dips(lp: LPARAM, scale: f32) -> (f32, f32) {
@@ -979,7 +1088,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let tabs_end = a.tab_x(last) + a.tab_w(last) + F;
                 let on_card = (x >= 0.0 && x <= W && y >= T && y <= H) || (y >= -STACK + 4.0 && y < T && ((x >= X2 && x <= tabs_end) || x >= W - 44.0));
                 if !on_card { return LRESULT(HTTRANSPARENT as isize); }
-                if a.hit_at(x, y).is_some() { LRESULT(HTCLIENT as isize) } else { LRESULT(HTCAPTION as isize) }
+                if a.language_menu.is_some() || a.hit_at(x, y).is_some() { LRESULT(HTCLIENT as isize) } else { LRESULT(HTCAPTION as isize) }
             }
             WM_SETCURSOR => {
                 if (lp.0 & 0xffff) as u32 == HTCLIENT {
@@ -1000,6 +1109,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_LBUTTONDOWN => {
                 let (x, y) = dips(lp, a.scale);
                 a.press = a.hit_at(x, y);
+                if !matches!(a.press, Some(Hit::LanguageMenu | Hit::Language(_))) { a.language_menu = None; }
                 SetCapture(hwnd);
                 a.invalidate();
                 LRESULT(0)
@@ -1012,6 +1122,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_KEYDOWN | WM_SYSKEYDOWN => { a.key(wp.0 as u32); LRESULT(0) }
+            WM_ACTIVATE if wp.0 & 0xffff == 0 => { a.language_menu = None; a.invalidate(); LRESULT(0) }
             WM_SYSCHAR | WM_CHAR => LRESULT(0),
             WM_TIMER => {
                 if wp.0 == 7 { let _ = KillTimer(hwnd, 7); a.run_install(); }
@@ -1042,6 +1153,8 @@ fn main() -> Result<()> {
         if let Ok(h) = FindWindowW(w!("NoteddSetup"), None) { if !h.0.is_null() { let _ = SetForegroundWindow(h); return Ok(()); } }
         let s = old_settings();
         let language = setting(&s, "language").as_deref().and_then(Language::from_tag);
+        let simple_editor = s.lines().rev().filter_map(|line| line.split_once('='))
+            .find(|(key, _)| key.trim() == "editor").is_some_and(|(_, value)| value.trim() == "simple");
         locale::set(language);
         let instance = GetModuleHandleW(None)?;
 
@@ -1114,10 +1227,11 @@ fn main() -> Result<()> {
         let land = 0.08 + 0.065 * (pages - 1) as f32;
         let mut st = Box::new(Setup {
             hwnd, factory, dw, fonts, round, dash, target: None, scale, uninstall, page: 0, cards,
-            intro: Ease::at(if uninstall { 1.0 } else { 0.0 }), intro_wait: land + 0.12, theme, theme0: theme, custom,
+            intro: Ease::at(if uninstall { 1.0 } else { 0.0 }), intro_wait: land + 0.12, theme, theme0: theme, simple_editor,
+            editor_pill: Ease::at(f32::from(u8::from(simple_editor))), custom,
             sel_k: [0, 1, 2, 3].map(|i| Ease::at((i == theme) as u8 as f32)), keys, capturing: false, autostart: true, desktop: false,
             sw: [Ease::at(1.0), Ease::at(0.0)], notes_dir, app_dir, progress: Ease::at(0.0), working: false, done: false, error: None,
-            hover: None, press: None, language, hover_k: [Ease::at(0.0); 10 + Language::ALL.len()], tick: Instant::now(), animating: true,
+            hover: None, press: None, language, language_menu: None, hover_k: [Ease::at(0.0); 13 + Language::ALL.len()], tick: Instant::now(), animating: true,
             done_t: 0.0, finale: false, fan_closed: false,
         });
         st.tick = Instant::now();

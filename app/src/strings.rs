@@ -6,6 +6,17 @@ pub const GENERAL: Message = Message("General", "Общие", "常规");
 pub const SHORTCUTS: Message = Message("Shortcuts", "Сочетания клавиш", "快捷键");
 pub const COLORS: Message = Message("Colors", "Цвета", "颜色");
 pub const LANGUAGE: Message = Message("Language", "Язык", "语言");
+pub const EDITOR: Message = Message("Editor", "Редактор", "编辑器");
+pub const SIMPLE: Message = Message("Simple", "Простой", "简洁");
+pub const BOLD: Message = Message("Bold", "Жирный", "加粗");
+pub const ITALIC: Message = Message("Italic", "Курсив", "斜体");
+pub const STRIKE: Message = Message("Strikethrough", "Зачёркнутый", "删除线");
+pub const CODE: Message = Message("Inline code", "Код", "行内代码");
+pub const UNDO: Message = Message("Undo", "Отменить", "撤销");
+pub const CUT: Message = Message("Cut", "Вырезать", "剪切");
+pub const COPY: Message = Message("Copy", "Копировать", "复制");
+pub const PASTE: Message = Message("Paste", "Вставить", "粘贴");
+pub const SELECT_ALL: Message = Message("Select all", "Выделить всё", "全选");
 pub const SYSTEM_LANGUAGE: Message = Message("System", "Как в Windows", "跟随系统");
 pub const THEME: Message = Message("Theme", "Тема", "主题");
 pub const PAPER: Message = Message("Paper", "Бумага", "纸张");
@@ -55,6 +66,7 @@ pub const SHORTCUT_TAKEN: Message = Message("In use by another app", "занят
 pub const SEARCH_NOTES: Message = Message("Search notes", "Поиск по заметкам", "搜索笔记");
 pub const FIND_IN_NOTE: Message = Message("Find in note", "Найти в заметке", "在笔记中查找");
 pub const NOTE_DELETED: Message = Message("Note deleted · Ctrl+Z to undo", "Заметка удалена · Ctrl+Z вернёт её", "笔记已删除 · Ctrl+Z 撤销");
+pub const DELETE_NOTE: Message = Message("Delete note", "Удалить заметку", "删除笔记");
 pub const NO_RESULTS: Message = Message("No matches for “{query}”. Press Enter to create a note.", "По запросу «{query}» ничего нет. Enter создаст такую заметку.", "没有找到“{query}”。按 Enter 新建笔记。");
 pub const UNTITLED: Message = Message("Untitled", "Без названия", "无标题");
 pub const TODAY: Message = Message("Today", "Сегодня", "今天");
@@ -73,7 +85,8 @@ pub const KEY_NAMES: [Message; crate::settings::KEYS] = [
     Message("Always on top", "Закрепить поверх окон", "窗口置顶"),
     QUIT,
     Message("Note color", "Цвет заметки", "笔记颜色"),
-    Message("Delete note", "Удалить заметку", "删除笔记"),
+    DELETE_NOTE,
+    Message("Highlight text", "Подсветить текст", "高亮文字"),
 ];
 
 pub const WELCOME: Message = Message(

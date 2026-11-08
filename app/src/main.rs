@@ -7,6 +7,7 @@
 #![windows_subsystem = "windows"]
 
 mod checkbox;
+mod edit_menu;
 mod icons;
 mod images;
 mod layer;
@@ -45,10 +46,11 @@ use windows::Win32::System::Time::*;
 use windows::Win32::System::Threading::Sleep;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::UI::Controls::RichEdit::{
-    tomAutoColor, tomListPeriod, tomUndefined, IRichEditOle, ITextDocument, ITextFont, ITextPara, ITextRange,
+    tomAutoColor, tomClientCoord, tomConstants, tomListPeriod, tomStart, tomUndefined,
+    IRichEditOle, ITextDocument, ITextFont, ITextPara, ITextRange,
 };
 use md::{Block, Style as Md};
-use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Controls::{BeginBufferedPaint, BufferedPaintInit, BufferedPaintUnInit, EndBufferedPaint, BPBF_COMPATIBLEBITMAP, MARGINS};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
@@ -67,6 +69,7 @@ const PADB: f32 = 26.0;
 // room above the drawer stack and below it (shadow, tilt)
 const LIST_TOP: f32 = 6.0;
 const LIST_BOTTOM: f32 = 40.0;
+const LIST_LIMIT: usize = 10;
 // resize grip along the folder edges
 const GRIP: f32 = 7.0;
 const HF: f32 = 290.0; // folder height in the drawer
@@ -89,6 +92,7 @@ const SETTINGS: &str = "__settings";
 // settings rows
 const SET_TOP: f32 = EDIT_TOP - 8.0;
 const SET_ROW: f32 = 50.0;
+const SET_BOTTOM: f32 = 18.0;
 const CTL_H: f32 = 32.0;
 const SET_LABEL: f32 = 170.0;
 // editor text box; the preview in the drawer uses the same numbers so switching shows no jump
@@ -98,6 +102,7 @@ const RE_DX: f32 = -1.0;
 // palette popup
 fn pal_w() -> f32 { let n = ncards() as f32; n * 32.0 + (n - 1.0) * 4.0 + 12.0 }
 const PAL_H: f32 = 44.0;
+const PAL_DELETE_H: f32 = 38.0;
 const PAL_ML: f32 = 24.0; // room for the shadow around the box
 const PAL_MT: f32 = 16.0;
 const PAL_MB: f32 = 40.0;
@@ -120,6 +125,7 @@ fn line_c() -> u32 { th().line }
 fn tab_dark() -> u32 { th().tab_dark }
 fn on_dark() -> u32 { th().on_dark }
 fn link_c() -> u32 { th().link }
+fn highlight_c() -> u32 { if night() { 0x57441d } else { 0xffe491 } }
 fn shadow() -> u32 { if night() { 0x000000 } else { 0x28261e } }
 fn shadow_k() -> f32 { if night() { 2.4 } else { 1.0 } }
 fn note_rgb(i: usize) -> u32 { th().cards[i.min(MAX_CARDS - 1)] }
@@ -208,7 +214,10 @@ const CFM_STRIKEOUT: u32 = 0x8;
 const CFE_ITALIC: u32 = 0x2;
 const CFE_UNDERLINE: u32 = 0x4;
 const CFE_STRIKEOUT: u32 = 0x8;
+const CFM_HIDDEN: u32 = 0x100;
+const CFE_HIDDEN: u32 = 0x100;
 const EM_CHARFROMPOS: u32 = 0x00D7;
+const EM_CANUNDO: u32 = 0x00C6;
 /// task box size and the gap after it, DIPs at text size 100%
 const TASK_BOX: f32 = 15.0;
 const TASK_GAP: f32 = 8.0;
@@ -237,6 +246,7 @@ const TIMER_ANIM: usize = 1;
 const TIMER_SAVE: usize = 2;
 const TIMER_CARET: usize = 3;
 const TIMER_ECARET: usize = 4;
+const TIMER_EDIT_MENU: usize = 5;
 const EM_GETSCROLLPOS: u32 = WM_USER + 221;
 const EM_SETSCROLLPOS: u32 = WM_USER + 222;
 // glyph box relative to the line top RichEdit reports for a character: (box top, box bottom, text top).
@@ -291,6 +301,7 @@ unsafe fn editor_font(range: &ITextRange, mask: u32, effects: u32, height: i32, 
     if mask & CFM_ITALIC != 0 { font.SetItalic(enabled(CFE_ITALIC))?; }
     if mask & CFM_STRIKEOUT != 0 { font.SetStrikeThrough(enabled(CFE_STRIKEOUT))?; }
     if mask & CFM_UNDERLINE != 0 { font.SetUnderline((effects & CFE_UNDERLINE != 0) as i32)?; }
+    if mask & CFM_HIDDEN != 0 { font.SetHidden(enabled(CFE_HIDDEN))?; }
     Ok(font)
 }
 
@@ -348,12 +359,14 @@ impl Ease {
 enum Mode { Edit, List }
 #[derive(PartialEq, Clone, Copy, Debug)]
 enum Ctl { Close, Pin, Gear, List, Find, Dot, New, More, Trash }
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum PalAction { Color(usize), Delete }
 /// a colour being edited on the colours page
 #[derive(PartialEq, Clone, Copy, Debug)]
 enum Pick { Ink, Accent, Card(usize) }
 /// settings rows
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
-enum Row { Page, Language, Theme, Scale, Dir, Far, Speed, Auto, Notes, Key(usize), Ink, Accent, Cards, Reset }
+enum Row { Page, Language, Editor, Theme, Scale, Dir, Far, Speed, Auto, Notes, Key(usize), Ink, Accent, Cards, Reset }
 /// one button of a settings row: label, chosen, a colour dot, shown value only (not clickable)
 struct Seg { text: String, on: bool, swatch: Option<u32>, value: bool, glyph: u8, keys: Option<(u32, u32)> }
 fn seg(text: impl Into<String>, on: bool) -> Seg { Seg { text: text.into(), on, swatch: None, value: false, glyph: 0, keys: None } }
@@ -374,6 +387,13 @@ fn key_parts(m: u32, vk: u32) -> Vec<String> {
     if vk != 0 { v.push(key_name(vk)); }
     v
 }
+
+const SIMPLE_FORMATS: [(md::Format, locale::Message, (u32, u32)); 4] = [
+    (md::Format::Bold, ui::BOLD, (2, b'B' as u32)),
+    (md::Format::Italic, ui::ITALIC, (2, b'I' as u32)),
+    (md::Format::Strike, ui::STRIKE, (6, b'S' as u32)),
+    (md::Format::Code, ui::CODE, (2, b'E' as u32)),
+];
 unsafe fn keys_width(a: &App, s: &Seg) -> f32 {
     if !s.text.is_empty() { return a.text_w(&u(&s.text), &a.fonts.small) + 28.0; }
     let (m, vk) = s.keys.unwrap_or((0, 0));
@@ -395,11 +415,27 @@ struct PreviewLine {
     x: f32,
     y: f32,
     layout: IDWriteTextLayout,
+    highlights: Vec<D2D_RECT_F>,
     title: bool,
     marker: Option<PreviewMarker>,
 }
 
 type PreviewLines = std::rc::Rc<[PreviewLine]>;
+
+unsafe fn preview_highlights(layout: &IDWriteTextLayout, marked: Vec<std::ops::Range<u32>>) -> Vec<D2D_RECT_F> {
+    let mut out = Vec::new();
+    for range in marked.into_iter().filter(|r| !r.is_empty()) {
+        let mut count = 0;
+        let len = range.end - range.start;
+        let _ = layout.HitTestTextRange(range.start, len, 0.0, 0.0, None, &mut count);
+        if count == 0 { continue; }
+        let mut metrics = vec![DWRITE_HIT_TEST_METRICS::default(); count as usize];
+        if layout.HitTestTextRange(range.start, len, 0.0, 0.0, Some(&mut metrics), &mut count).is_ok() {
+            out.extend(metrics.into_iter().take(count as usize).map(|m| rect(m.left, m.top, m.left + m.width, m.top + m.height)));
+        }
+    }
+    out
+}
 
 struct EditSnapshot {
     bitmap: ID2D1Bitmap,
@@ -445,6 +481,9 @@ struct App {
     list_q: Vec<u16>,
     shown: Vec<String>,
     sel: usize,
+    list_start: usize,
+    list_len: usize,
+    list_wheel: i32,
     anims: HashMap<String, Anim>,
     colors: HashMap<String, [f32; 3]>,
     kinds: Vec<Kind>,
@@ -473,7 +512,8 @@ struct App {
     tracking: bool,
     palette: Option<String>,
     pal_anchor: (f32, f32),
-    pal_hover: Option<usize>,
+    pal_hover: Option<PalAction>,
+    pal_delete_pressed: bool,
     pal_tracking: bool,
     pinned: bool,
     /// screen edges the editor is stuck to: 1 left, 2 right, 4 bottom, 8 top
@@ -491,6 +531,8 @@ struct App {
     settings: bool,
     /// settings page: 0 general, 1 keys, 2 colours
     set_page: usize,
+    set_scroll: f32,
+    set_scroll_drag: Option<f32>,
     /// the key binding listening for a new combination
     capturing: Option<usize>,
     /// a global binding that could not be registered
@@ -539,6 +581,7 @@ struct App {
     hits_layer: Layer,
     caret_layer: Layer,
     pop: Layer,
+    edit_menu: Option<edit_menu::EditMenu>,
     /// window top in screen px, eased: the drawer keeps the window on screen, a release near the taskbar glides onto it
     win_y: f32,
     win_y_to: f32,
@@ -876,7 +919,8 @@ impl App {
         let keep = self.get_sel();
         // WM_SETREDRAW(TRUE) also makes a hidden window visible, so only use it while RichEdit is shown
         let vis = self.edit_visible && IsWindowVisible(self.edit).as_bool();
-        if vis { SendMessageW(self.edit, WM_SETREDRAW, WPARAM(0), LPARAM(0)); }
+        let redraw = vis && (!incremental || !frozen);
+        if redraw { SendMessageW(self.edit, WM_SETREDRAW, WPARAM(0), LPARAM(0)); }
         let text = self.edit_text();
         let paras = para_ranges(&text);
         self.title_end = paras[0].1;
@@ -926,7 +970,9 @@ impl App {
             }
         };
         let all = text.len() as i32 + 1;
-        let base = CFM_FACE | CFM_SIZE | CFM_COLOR | CFM_BOLD | CFM_ITALIC | CFM_STRIKEOUT | CFM_UNDERLINE | CFM_BACKCOLOR;
+        let simple = self.prefs.simple_editor;
+        let (mark_mask, mark_effect) = if simple { (CFM_HIDDEN, CFE_HIDDEN) } else { (CFM_COLOR, 0) };
+        let base = CFM_FACE | CFM_SIZE | CFM_COLOR | CFM_BOLD | CFM_ITALIC | CFM_STRIKEOUT | CFM_UNDERLINE | CFM_BACKCOLOR | CFM_HIDDEN;
         let reset_all = unchanged.iter().all(Option::is_none);
         if reset_all {
             fmt(0, all, base, CFE_AUTOBACKCOLOR, 16.0 * ts(), ink2(), AUTO, "Geologica");
@@ -1027,8 +1073,11 @@ impl App {
             let mark_blk = if i == 0 { &blocks[0] } else { &blk };
             if matches!(mark_blk, Block::Heading(_) | Block::Quote) {
                 let m = md::mark_len(line, mark_blk) as i32;
-                fmt(a, a + m, CFM_COLOR, 0, 0.0, ink3(), 0, "");
+                fmt(a, a + m, mark_mask, mark_effect, 0.0, ink3(), 0, "");
                 from = a + m;
+            }
+            if simple && (blk == Block::Fence || pic_h > 0.0) {
+                fmt(a, b, mark_mask, mark_effect, 0.0, 0, 0, "");
             }
             if task {
                 let space = line.get(1) == Some(&32);
@@ -1056,7 +1105,8 @@ impl App {
                 if line[0] == DONE { fmt(text_at, b, CFM_STRIKEOUT | CFM_COLOR, CFE_STRIKEOUT, 0.0, ink3(), 0, ""); }
                 from = a + 1;
             }
-            if matches!(blk, Block::Plain | Block::Quote | Block::Heading(_)) && from < b {
+            let missing_picture = simple && matches!(blk, Block::Image(_)) && pic_h == 0.0;
+            if (matches!(blk, Block::Plain | Block::Quote | Block::Heading(_)) || missing_picture) && from < b {
                 let seg = &text[from as usize..b as usize];
                 let (spans, ls) = md::inline(seg);
                 let at = |k: usize| from + k as i32;
@@ -1064,15 +1114,17 @@ impl App {
                 for sp in ordered {
                     let (x0, x1) = (at(sp.a), at(sp.b));
                     match sp.style {
-                        Md::Mark => fmt(x0, x1, CFM_COLOR, 0, 0.0, ink3(), 0, ""),
+                        Md::Mark => fmt(x0, x1, mark_mask, mark_effect, 0.0, ink3(), 0, ""),
                         Md::Bold => fmt(x0, x1, CFM_BOLD | CFM_COLOR, CFE_BOLD, 0.0, ink(), 0, ""),
                         Md::Italic => fmt(x0, x1, CFM_ITALIC, CFE_ITALIC, 0.0, 0, 0, ""),
                         Md::Strike => fmt(x0, x1, CFM_STRIKEOUT, CFE_STRIKEOUT, 0.0, 0, 0, ""),
+                        Md::Highlight => fmt(x0, x1, CFM_BACKCOLOR, 0, 0.0, 0, highlight_c(), ""),
                         Md::Code => { fmt(x0, x1, CFM_FACE | CFM_SIZE | CFM_COLOR, 0, size * 0.9, ink(), 0, "Consolas"); codes.push((x0, x1)); }
                         Md::Link => fmt(x0, x1, CFM_COLOR, 0, 0.0, link_c(), 0, ""),
                         Md::Url => {
                             let in_link = sp.a >= 2 && seg[sp.a - 1] == b'(' as u16 && seg[sp.a - 2] == b']' as u16;
-                            if in_link { fmt(x0, x1, CFM_COLOR, 0, 0.0, ink3(), 0, ""); }
+                            let empty_label = sp.a >= 3 && seg[sp.a - 3] == b'[' as u16;
+                            if in_link && !(simple && empty_label) { fmt(x0, x1, mark_mask, mark_effect, 0.0, ink3(), 0, ""); }
                             else { fmt(x0, x1, CFM_COLOR | CFM_UNDERLINE, CFE_UNDERLINE, 0.0, link_c(), 0, ""); }
                         }
                     }
@@ -1100,10 +1152,12 @@ impl App {
             let _ = d.Undo(TOM_RESUME);
             if frozen { let _ = d.Unfreeze(); }
         }
-        if vis {
+        if redraw {
             SendMessageW(self.edit, WM_SETREDRAW, WPARAM(1), LPARAM(0));
+        }
+        if vis {
             if hit.is_some() { SendMessageW(self.edit, EM_SCROLLCARET, WPARAM(0), LPARAM(0)); }
-            let _ = InvalidateRect(self.edit, None, true);
+            let _ = InvalidateRect(self.edit, None, false);
         }
         self.guard = false;
         self.seen.0 = -1;
@@ -1239,6 +1293,168 @@ impl App {
     unsafe fn on_edit_change(&mut self) {
         if self.guard { return; }
         self.auto_list();
+        if self.finding { self.find_hits(false); } else { self.style_edit(true); }
+        self.after_change();
+    }
+
+    /// Keep delimiters paired when a visible selection replaces part of a formatted span.
+    fn simple_selection(&self, start: i32, end: i32, erase: i32) -> Option<(i32, i32, Vec<u16>, Vec<u16>)> {
+        if !self.prefs.simple_editor { return None; }
+        let text = &self.styled_text;
+        let (mut a, mut b) = (start.max(0) as usize, (end.max(0) as usize).min(text.len()));
+        if a == 0 && b == text.len() { return None; }
+        if a == b && erase == 0 { return None; }
+        let first = self.pstyle.partition_point(|p| (p.b as usize) < a);
+        let mut pairs = Vec::new();
+        for p in self.pstyle[first..].iter().take_while(|p| p.a as usize <= b) {
+            if p.a != 0 && matches!(p.block, Block::Fence | Block::Code | Block::Image(_)) { continue; }
+            let line = &text[p.a as usize..p.b as usize];
+            let offset = p.a as usize + md::mark_len(line, &p.block);
+            pairs.extend(md::delimiters(&text[offset..p.b as usize]).into_iter()
+                .map(|(l, r)| (offset + l.start..offset + l.end, offset + r.start..offset + r.end)));
+        }
+        if pairs.is_empty() { return None; }
+        if a == b {
+            let mut cp = if erase < 0 { a.checked_sub(1)? } else { b };
+            while let Some(r) = pairs.iter().flat_map(|(l, r)| [l, r]).find(|r| r.contains(&cp)) {
+                cp = if erase < 0 { r.start.checked_sub(1)? } else { r.end };
+            }
+            let ch = *text.get(cp)?;
+            a = cp - usize::from((0xdc00..=0xdfff).contains(&ch) && cp > 0);
+            b = cp + 1 + usize::from((0xd800..=0xdbff).contains(&ch) && cp + 1 < text.len());
+        }
+        let original = (a, b);
+        for (open, close) in &pairs {
+            if a <= open.end && b >= close.start {
+                a = a.min(open.start);
+                b = b.max(close.end);
+            }
+        }
+        // Move a delimiter past whitespace exposed by an erase so its span stays valid.
+        let (mut left_space, mut right_space) = (a..a, b..b);
+        if erase != 0 {
+            let blank = |c| c != 13 && c != 10 && md::space(c);
+            let left = a - text[..a].iter().rev().take_while(|&&c| blank(c)).count();
+            let right = b + text[b..].iter().take_while(|&&c| blank(c)).count();
+            for (open, close) in &pairs {
+                if !matches!(text[open.start], 42 | 95 | 61) { continue; }
+                if left < a && left > open.end && b >= close.start {
+                    left_space = left..a;
+                    b = b.max(close.end);
+                }
+                if right > b && right < close.start && a <= open.end {
+                    right_space = b..right;
+                    a = a.min(open.start);
+                }
+            }
+        }
+        pairs.sort_unstable_by_key(|(l, _)| l.start);
+        let mut openings = Vec::new();
+        let mut closings = Vec::new();
+        for (open, close) in pairs {
+            if a <= open.end && b >= close.start { continue; }
+            if a < open.end && b > open.start { openings.extend_from_slice(&text[a.max(open.start)..b.min(open.end)]); }
+            if a < close.end && b > close.start { closings.push(a.max(close.start)..b.min(close.end)); }
+        }
+        let (start, end) = (a.min(left_space.start), b.max(right_space.end));
+        if (start, end) == original && openings.is_empty() && closings.is_empty() { return None; }
+        closings.sort_unstable_by_key(|r| r.start);
+        let before = closings.into_iter().flat_map(|r| text[r].iter().copied())
+            .chain(text[left_space].iter().copied()).collect();
+        let after = text[right_space].iter().copied().chain(openings).collect();
+        Some((start as i32, end as i32, before, after))
+    }
+
+    unsafe fn simple_edit_key(&mut self, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        if !self.prefs.simple_editor || self.guard { return None; }
+        let erase = match (msg, wp.0) {
+            (WM_KEYDOWN, k) if k == VK_BACK.0 as usize && cur_mods() & !4 == 0 => -1,
+            (WM_KEYDOWN, k) if k == VK_DELETE.0 as usize && cur_mods() == 0 => 1,
+            (WM_CLEAR | WM_CUT, _) => 1,
+            (WM_CHAR, c) if c >= 32 || matches!(c, 9 | 13) => 0,
+            _ => return None,
+        };
+        let (a, b) = self.get_sel();
+        if a == b && matches!(msg, WM_CUT | WM_CLEAR) { return None; }
+        let (start, end, before, after) = self.simple_selection(a, b, erase)?;
+        let old: WNDPROC = std::mem::transmute(OLD_EDIT);
+        let doc = self.doc.clone();
+        let undo = doc.as_ref().is_some_and(|d| d.BeginEditCollection().is_ok());
+        self.guard = true;
+        if msg == WM_CUT { CallWindowProcW(old, self.edit, WM_COPY, WPARAM(0), LPARAM(0)); }
+        let pos = start + before.len() as i32;
+        let replacement: Vec<_> = before.into_iter().chain(after).chain([0]).collect();
+        self.select(start, end);
+        SendMessageW(self.edit, EM_REPLACESEL, WPARAM(1), LPARAM(replacement.as_ptr() as isize));
+        self.select(pos, pos);
+        let result = if erase == 0 { CallWindowProcW(old, self.edit, msg, wp, lp) } else { LRESULT(0) };
+        if let Some(d) = &doc { if undo { let _ = d.EndEditCollection(); } }
+        self.guard = false;
+        self.on_edit_change();
+        SendMessageW(self.edit, EM_SCROLLCARET, WPARAM(0), LPARAM(0));
+        Some(result)
+    }
+
+    unsafe fn toggle_format(&mut self, format: md::Format) {
+        if !self.edit_visible || GetFocus() != self.edit { return; }
+        let (a, b) = self.get_sel();
+        if a >= b { return; }
+        let text = &self.styled_text;
+        let mut edits = Vec::new();
+        let first = self.pstyle.partition_point(|p| p.b <= a);
+        for p in self.pstyle[first..].iter().take_while(|p| p.a < b) {
+            if matches!(p.block, Block::Fence | Block::Code | Block::Image(_)) { continue; }
+            let line = &text[p.a as usize..p.b as usize];
+            let prefix = if p.task.is_some() { 1 } else { md::mark_len(line, &p.block) };
+            let start = ((a - p.a).max(0) as usize).max(prefix);
+            let end = (b.min(p.b) - p.a) as usize;
+            if start >= end { continue; }
+            if let Some((range, marker)) = md::format_edit(line, start..end, format, self.prefs.simple_editor) {
+                edits.push((p.a as usize + range.start..p.a as usize + range.end, marker));
+            }
+        }
+        if edits.is_empty() { return; }
+        let unwrap = edits.iter().all(|(_, marker)| marker.is_none());
+        edits.retain(|(_, marker)| marker.is_none() == unwrap);
+        let width = format.width();
+        let start = edits[0].0.start;
+        let end = edits.last().unwrap().0.end;
+        let mut out = Vec::new();
+        let mut at = start;
+        for (range, marker) in edits {
+            out.extend_from_slice(&text[at..range.start]);
+            if let Some(marker) = marker {
+                out.extend_from_slice(marker);
+                out.extend_from_slice(&text[range.clone()]);
+                out.extend_from_slice(marker);
+            } else {
+                out.extend_from_slice(&text[range.start + width..range.end - width]);
+            }
+            at = range.end;
+        }
+        let end_after = start + out.len();
+
+        // Keep native list formats if this replacement spans multiple paragraphs.
+        self.load_kinds = Some(self.kinds.clone());
+        self.guard = true;
+        let (start, end) = (start as i32, end as i32);
+        // RichEdit snaps the visual selection across adjacent hidden markers.
+        let replaced = self.prefs.simple_editor && self.doc.as_ref().is_some_and(|d| {
+            d.Range(start, end).and_then(|range| BSTR::from_wide(&out).and_then(|text| range.SetText(&text))).is_ok()
+        });
+        if !replaced {
+            self.select(start, end);
+            if self.get_sel() != (start, end) {
+                self.load_kinds = None;
+                self.select(a, b);
+                self.guard = false;
+                return;
+            }
+            out.push(0);
+            SendMessageW(self.edit, EM_REPLACESEL, WPARAM(1), LPARAM(out.as_ptr() as isize));
+        }
+        self.select(start, end_after as i32);
+        self.guard = false;
         if self.finding { self.find_hits(false); } else { self.style_edit(true); }
         self.after_change();
     }
@@ -1378,7 +1594,8 @@ impl App {
     }
     /// plain text; list markers and task boxes on the pasted lines become lists, as if typed
     unsafe fn insert_text(&mut self, t: &str) {
-        let (start, end) = self.get_sel();
+        let (mut start, end) = self.get_sel();
+        let selection = self.simple_selection(start, end, 0);
         let text = t.replace("\r\n", "\n").replace('\r', "\n");
         let redraw = self.edit_visible && IsWindowVisible(self.edit).as_bool();
         if redraw { SendMessageW(self.edit, WM_SETREDRAW, WPARAM(0), LPARAM(0)); }
@@ -1386,6 +1603,13 @@ impl App {
         let frozen = doc.as_ref().is_some_and(|d| d.Freeze().is_ok());
         let undo_group = doc.as_ref().is_some_and(|d| d.BeginEditCollection().is_ok());
         self.guard = true;
+        if let Some((a, b, before, after)) = selection {
+            start = a + before.len() as i32;
+            let replacement: Vec<_> = before.into_iter().chain(after).chain([0]).collect();
+            self.select(a, b);
+            SendMessageW(self.edit, EM_REPLACESEL, WPARAM(1), LPARAM(replacement.as_ptr() as isize));
+            self.select(start, start);
+        }
         // Select All includes RichEdit's final paragraph mark.
         let kinds = if start == 0 && end as usize >= self.styled_text.len() && !text.contains('\0') {
             let (w, kinds) = editor_markdown(&text);
@@ -1557,15 +1781,7 @@ impl App {
             if let Some(b) = &self.checkboxes { b.draw(dc, at.x, y, done); }
         }
     }
-    /// drawn over what RichEdit just painted: quote bars, code backgrounds and pictures
-    unsafe fn draw_marks(&mut self, rgn: HRGN) {
-        if self.pstyle.is_empty() || !self.edit_visible { return; }
-        let dc = GetDC(self.edit);
-        SelectClipRgn(dc, rgn);
-        self.draw_marks_on(dc);
-        ReleaseDC(self.edit, dc);
-    }
-
+    /// Draw the decorations into the same surface as the text.
     unsafe fn draw_marks_on(&mut self, dc: HDC) {
         let edit = self.edit;
         let s = self.scale;
@@ -1761,7 +1977,22 @@ impl App {
         if !focus || s0 != s1 { self.caret_off(); return; }
         let hl = self.hl_at(s0);
         let s = self.scale;
-        let (tx, ty, th) = (cp.x as f32, cp.y as f32 + (hl.0 + 0.5) * s, (hl.1 - hl.0 - 1.0) * s);
+        let tx = cp.x as f32;
+        let th = (hl.1 - hl.0 - 1.0) * s;
+        let mut ty = cp.y as f32 + (hl.0 + 0.5) * s;
+        if self.para_at(s0).is_some_and(|i| matches!(self.pstyle[i].block, Block::Heading(_))) {
+            if let Some(selection) = self.doc.as_ref().and_then(|d| d.GetSelection().ok()) {
+                // The text baseline includes paragraph spacing. Keep the native caret's
+                // visual line if TOM points to the other side of a wrap.
+                let mut x = i32::MIN;
+                let mut baseline = i32::MIN;
+                let flags = tomConstants(tomStart.0 | tomClientCoord.0 | TA_BASELINE.0 as i32);
+                if selection.GetPoint(flags, &mut x, &mut baseline).is_ok()
+                    && baseline != i32::MIN && (x.abs_diff(cp.x) as f32) <= 2.0 * s {
+                    ty = baseline as f32 + 2.0 * ts() * s - th;
+                }
+            }
+        }
         let c = &mut self.car;
         c.tx = tx; c.ty = ty; c.th = th;
         // appear in place; scrolling moves with the text instead of gliding
@@ -1829,51 +2060,91 @@ impl App {
 
     // ---------- palette: an owned popup so it can lie over RichEdit ----------
     unsafe fn open_palette(&mut self, id: String, ax: f32, ay: f32) {
+        self.close_edit_menu();
         self.palette = Some(id);
         self.pal_anchor = (ax, ay);
         self.pal_t = Ease::at(0.0);
         self.pal_t.to = 1.0;
         self.pal_hover = None;
+        self.pal_delete_pressed = false;
         self.sw_sc = [Ease::at(1.0); MAX_CARDS];
         self.draw_palette();
         self.start_anim();
     }
     unsafe fn close_palette(&mut self) {
+        self.pal_delete_pressed = false;
         if self.palette.take().is_some() { self.pop.hide(); self.invalidate(); }
     }
-    fn pal_left(&self) -> f32 { (self.pal_anchor.0 - pal_w() / 2.0).clamp(0.0, width() - pal_w()) }
+    fn pal_dims(&self) -> (f32, f32) {
+        if self.mode == Mode::List { (pal_w().max(184.0), PAL_H + PAL_DELETE_H) } else { (pal_w(), PAL_H) }
+    }
     unsafe fn draw_palette(&mut self) {
         let Some(id) = self.palette.clone() else { return };
         let chosen = self.note(&id).map(|n| n.color).unwrap_or(0);
-        let (left, top) = (self.pal_left(), self.pal_anchor.1);
+        let (pw, ph) = self.pal_dims();
+        let left = (self.pal_anchor.0 - pw / 2.0).clamp(0.0, width() - pw);
+        let mut top = self.pal_anchor.1;
+        let listing = self.mode == Mode::List;
+        if listing {
+            let work = self.work_area();
+            let mut origin = POINT::default();
+            let _ = ClientToScreen(self.hwnd, &mut origin);
+            let min = (work.top - origin.y) as f32 / self.scale + 6.0;
+            let max = (work.bottom - origin.y) as f32 / self.scale - ph - 1.0;
+            top = top.clamp(min, max.max(min));
+        }
         let mut p = POINT { x: ((left + 1.0 - PAL_ML) * self.scale).round() as i32, y: ((top + 1.0 - PAL_MT) * self.scale).round() as i32 };
         let _ = ClientToScreen(self.hwnd, &mut p);
-        let (w, h) = (((pal_w() + 2.0 * PAL_ML) * self.scale).ceil() as i32, ((PAL_H + PAL_MT + PAL_MB) * self.scale).ceil() as i32);
+        let (w, h) = (((pw + 2.0 * PAL_ML) * self.scale).ceil() as i32, ((ph + PAL_MT + PAL_MB) * self.scale).ceil() as i32);
         let t = self.pal_t.v;
         let dy = -6.0 * (1.0 - t);
         let sc = self.sw_sc;
+        let delete_hover = self.pal_hover == Some(PalAction::Delete);
+        let (trash, font, round) = (&self.icons.trash, &self.fonts.small, &self.round);
         self.pop.present(p.x, p.y, w, h, t, |rt| {
             let (x0, y0) = (PAL_ML, PAL_MT + dy);
-            let _ = soft_shadow(rt, rect(x0, y0, x0 + pal_w(), y0 + PAL_H), 14.0, 12.0, 24.0, 0.16);
+            let _ = soft_shadow(rt, rect(x0, y0, x0 + pw, y0 + ph), 14.0, 12.0, 24.0, 0.16);
             let (Ok(paper), Ok(line)) = (rt.CreateSolidColorBrush(&rgb(paper(), 1.0), None), rt.CreateSolidColorBrush(&rgb(line_c(), 1.0), None)) else { return };
-            rt.FillRoundedRectangle(&rrect(x0, y0, x0 + pal_w(), y0 + PAL_H, 14.0), &paper);
-            rt.DrawRoundedRectangle(&rrect(x0 + 0.75, y0 + 0.75, x0 + pal_w() - 0.75, y0 + PAL_H - 0.75, 13.25), &line, 1.5, None);
+            rt.FillRoundedRectangle(&rrect(x0, y0, x0 + pw, y0 + ph, 14.0), &paper);
+            rt.DrawRoundedRectangle(&rrect(x0 + 0.75, y0 + 0.75, x0 + pw - 0.75, y0 + ph - 0.75, 13.25), &line, 1.5, None);
             for i in 0..ncards() {
-                let (cx, cy) = (x0 + 6.0 + 16.0 + 36.0 * i as f32, y0 + 6.0 + 16.0);
+                let (cx, cy) = (x0 + (pw - pal_w()) / 2.0 + 22.0 + 36.0 * i as f32, y0 + 22.0);
                 let k = sc[i].v;
                 if let Ok(b) = rt.CreateSolidColorBrush(&rgb(note_rgb(i), 1.0), None) { rt.FillEllipse(&circle(cx, cy, 10.0 * k), &b); }
                 rt.DrawEllipse(&circle(cx, cy, 9.25 * k), &line, 1.5, None);
                 if i == chosen { rt.DrawEllipse(&circle(cx, cy, 15.25), &line, 1.5, None); }
             }
+            if listing {
+                let Ok(b) = rt.CreateSolidColorBrush(&rgb(ink(), 0.14), None) else { return };
+                let y = y0 + PAL_H;
+                rt.DrawLine(pt(x0 + 12.0, y), pt(x0 + pw - 12.0, y), &b, 1.0, None);
+                if delete_hover {
+                    b.SetColor(&rgb(ink(), 0.09));
+                    rt.FillRoundedRectangle(&rrect(x0 + 5.0, y + 4.0, x0 + pw - 5.0, y0 + ph - 5.0, 8.0), &b);
+                }
+                b.SetColor(&rgb(ink(), 1.0));
+                rt.SetTransform(&shift(x0 + 14.0, y + (PAL_DELETE_H - 16.0) / 2.0));
+                rt.DrawGeometry(trash, &b, 1.4, round);
+                rt.SetTransform(&shift(0.0, 0.0));
+                rt.DrawText(&u(ui::DELETE_NOTE.get()), font, &rect(x0 + 39.0, y, x0 + pw - 10.0, y0 + ph),
+                    &b, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
         });
     }
-    /// palette popup px -> swatch index, or None when outside the circles; second value: inside the box
-    fn pal_hit(&self, lp: LPARAM) -> (Option<usize>, bool) {
+    /// Palette coordinates use the same offset as the opening animation.
+    fn pal_hit(&self, lp: LPARAM) -> (Option<PalAction>, bool) {
         let x = (lp.0 & 0xffff) as i16 as f32 / self.scale - PAL_ML;
-        let y = ((lp.0 >> 16) & 0xffff) as i16 as f32 / self.scale - PAL_MT;
-        let inside = (0.0..pal_w()).contains(&x) && (0.0..PAL_H).contains(&y);
-        let sw = (0..ncards()).find(|&i| { let (cx, cy) = (22.0 + 36.0 * i as f32, 22.0); (x - cx).hypot(y - cy) < 16.0 });
-        (sw, inside)
+        let y = ((lp.0 >> 16) & 0xffff) as i16 as f32 / self.scale - PAL_MT + 6.0 * (1.0 - self.pal_t.v);
+        let (w, h) = self.pal_dims();
+        let inside = (0.0..w).contains(&x) && (0.0..h).contains(&y);
+        if self.mode == Mode::List && (5.0..w - 5.0).contains(&x) && (PAL_H + 4.0..h - 5.0).contains(&y) {
+            return (Some(PalAction::Delete), true);
+        }
+        let color = (0..ncards()).find(|&i| {
+            let cx = (w - pal_w()) / 2.0 + 22.0 + 36.0 * i as f32;
+            (x - cx).hypot(y - 22.0) < 16.0
+        });
+        (color.map(PalAction::Color), inside)
     }
 
     // ---------- layout targets ----------
@@ -1889,38 +2160,83 @@ impl App {
     }
     unsafe fn retarget(&mut self) { self.retarget_with(false); }
     unsafe fn retarget_with(&mut self, stagger: bool) {
-        let order = self.order();
-        let q = String::from_utf16_lossy(&self.list_q).to_lowercase();
-        let q = q.trim().to_string();
-        self.shown = if self.mode == Mode::List { order.iter().filter(|id| q.is_empty() || self.note(id).map(|n| n.lower.contains(&q)).unwrap_or(false)).cloned().collect() } else { vec![] };
-        let m = self.shown.len() as f32;
+        self.shown.clear();
+        if self.mode == Mode::List {
+            let query = String::from_utf16_lossy(&self.list_q).to_lowercase();
+            let q = query.trim();
+            let mut matches: Vec<_> = self.notes.iter().filter(|n| q.is_empty() || n.lower.contains(q)).collect();
+            matches.sort_by_key(|n| std::cmp::Reverse(n.seen()));
+            self.shown.extend(matches.into_iter().map(|n| n.id.clone()));
+        }
+        self.layout_stack(stagger, 0);
+    }
+    unsafe fn layout_stack(&mut self, stagger: bool, scroll: isize) {
         let work = self.work_area();
-        let max_h = ((work.bottom - work.top) as f32 / self.scale * 0.86).max(480.0);
-        let step = ((max_h - HF - LIST_TOP - LIST_BOTTOM) / m.max(1.0)).clamp(T + 6.0, 50.0);
-        let list_h = m * step + HF + LIST_TOP + LIST_BOTTOM;
+        let work_h = (work.bottom - work.top) as f32 / self.scale;
+        let base_h = HF + LIST_TOP + LIST_BOTTOM;
+        let min_step = T + 6.0;
+        let capacity = (((work_h - base_h) / min_step) as usize).clamp(1, LIST_LIMIT);
+        let old_start = self.list_start;
+        let count = self.shown.len();
+        self.list_len = count.min(capacity);
+        self.sel = self.sel.min(count.saturating_sub(1));
+        let max_start = count.saturating_sub(self.list_len);
+        self.list_start = if scroll != 0 {
+            self.list_start.saturating_add_signed(scroll).min(max_start)
+        } else {
+            self.list_start.min(max_start).clamp(self.sel.saturating_add(1).saturating_sub(capacity), self.sel)
+        };
+        if self.list_len != 0 {
+            self.sel = self.sel.clamp(self.list_start, self.list_start + self.list_len - 1);
+        }
+        let visible = &self.shown[self.list_start..self.list_start + self.list_len];
+        let direction = (self.list_start as isize - old_start as isize).signum() as f32;
+        let m = visible.len() as f32;
+        let max_h = (work_h * 0.86).max(480.0).min(work_h);
+        let step = ((max_h - base_h) / m.max(1.0)).clamp(min_step, 50.0);
+        let list_h = m * step + base_h;
         self.win_h_to = if self.mode == Mode::List { list_h } else { eh() + PADB };
         self.win_y_to = if self.mode == Mode::List {
             self.edit_top.min(work.bottom - (list_h * self.scale).round() as i32).max(work.top) as f32
         } else { self.edit_top as f32 };
         if self.drag0.is_some() { self.win_y_to = self.win_y; }
-        let sel_id = self.shown.get(self.sel).cloned();
-        for (k, id) in order.iter().enumerate() {
-            let a = self.anims.entry(id.clone()).or_insert_with(|| Anim { cur: V { y: 18.0, sc: 0.955, h: eh(), o: 0.0, ..Default::default() }, ..Default::default() });
-            if self.mode == Mode::Edit {
-                if *id == self.cur && !self.settings { a.to = V { y: 0.0, sc: 1.0, h: eh(), o: 1.0, ..Default::default() }; a.z = 1000; }
-                else { a.to = V { y: 18.0, sc: 0.955, h: eh(), o: 0.0, ..Default::default() }; a.z = 100 - k as i32; }
-                a.delay = 0.0;
-            } else if let Some(s) = self.shown.iter().position(|x| x == id) {
-                let sf = s as f32;
-                let picked = sel_id.as_deref() == Some(id);
-                let (rot, sx) = if picked { tilt(id) } else { (0.0, 0.0) };
-                a.to = V { y: (m - sf) * step + LIST_TOP, sc: LIST_SC * PERSP / (PERSP + sf * DEPTH), h: HF, o: 1.0, lift: if picked { 14.0 } else { 0.0 }, rot, sx };
-                a.z = 100 - s as i32;
-                a.delay = if stagger { (m - sf) * 0.018 } else { 0.0 };
-            } else {
-                a.to = V { y: (m + 1.0) * step + 40.0, sc: LIST_SC * PERSP / (PERSP + 40.0), h: HF, o: 0.0, ..Default::default() };
-                a.z = -1;
-            }
+        let listing = self.mode == Mode::List;
+        let window_changed = listing && (visible.iter().any(|id| self.anims.get(id).is_none_or(|a| a.to.o == 0.0))
+            || self.anims.iter().any(|(id, a)| id != SEARCH && id != SETTINGS && a.to.o > 0.0 && !visible.contains(id)));
+        if window_changed {
+            // Keep just the current and previous window, even when scroll events arrive mid-fade.
+            self.anims.retain(|id, a| id == SEARCH || id == SETTINGS || a.to.o > 0.0 || visible.contains(id));
+        }
+        let hidden = V { y: 18.0, sc: LIST_SC, h: eh(), ..Default::default() };
+        for (id, a) in &mut self.anims {
+            if id == SEARCH || id == SETTINGS || visible.contains(id) { continue; }
+            if !listing && id == &self.cur && !self.settings { continue; }
+            if listing && a.to.o == 0.0 { continue; }
+            a.to = if listing {
+                V { y: (a.cur.y + step * direction).max(LIST_TOP), lift: 0.0, o: 0.0, ..a.cur }
+            } else { hidden };
+            a.delay = 0.0;
+            if listing && direction <= 0.0 { a.z = -1; }
+        }
+        for (i, id) in visible.iter().enumerate() {
+            let sf = i as f32;
+            let picked = self.list_start + i == self.sel;
+            let (rot, sx) = if picked { tilt(id) } else { (0.0, 0.0) };
+            let to = V { y: (m - sf) * step + LIST_TOP, sc: LIST_SC * PERSP / (PERSP + sf * DEPTH), h: HF, o: 1.0, lift: if picked { 14.0 } else { 0.0 }, rot, sx };
+            let from = if direction != 0.0 {
+                V { y: (to.y - step * direction).max(LIST_TOP + 8.0), o: 0.0, ..to }
+            } else { hidden };
+            let a = self.anims.entry(id.clone()).or_insert(Anim { cur: from, ..Default::default() });
+            a.to = to;
+            a.z = 100 - i as i32;
+            if stagger { a.delay = (m - sf) * 0.018; }
+            else if window_changed { a.delay = 0.0; }
+        }
+        if !listing && !self.settings {
+            let a = self.anims.entry(self.cur.clone()).or_insert(Anim { cur: hidden, ..Default::default() });
+            a.to = V { y: 0.0, sc: 1.0, h: eh(), o: 1.0, ..Default::default() };
+            a.z = 1000;
+            a.delay = 0.0;
         }
         let s = self.anims.entry(SEARCH.to_string()).or_insert_with(|| Anim { cur: V { y: 18.0, sc: 0.955, h: eh(), ..Default::default() }, ..Default::default() });
         s.to = if self.mode == Mode::List { V { y: LIST_TOP, sc: LIST_SC * PERSP / (PERSP + m * DEPTH), h: HF, o: 1.0, ..Default::default() } } else { V { y: 18.0, sc: 0.955, h: eh(), o: 0.0, ..Default::default() } };
@@ -1929,9 +2245,22 @@ impl App {
         let st = self.anims.entry(SETTINGS.to_string()).or_insert_with(|| Anim { cur: V { y: 18.0, sc: 0.955, h: eh(), ..Default::default() }, ..Default::default() });
         st.to = if up { V { y: 0.0, sc: 1.0, h: eh(), o: 1.0, ..Default::default() } } else { V { y: 18.0, sc: 0.955, h: eh(), o: 0.0, ..Default::default() } };
         st.z = if up { 1500 } else { -2 };
+        self.trim_stack_cache();
         self.dark.to = if self.finding { DARK_FIND } else if self.hover_plus { DARK_HOVER } else { DARK };
         self.dock_radii();
         self.start_anim();
+    }
+    fn trim_stack_cache(&mut self) {
+        self.colors.retain(|id, _| self.anims.contains_key(id));
+        self.previews.get_mut().retain(|id, _| self.anims.contains_key(id));
+    }
+    unsafe fn scroll_list(&mut self, wp: WPARAM) {
+        self.list_wheel += i32::from((wp.0 >> 16) as i16);
+        let steps = -(self.list_wheel / 120) as isize;
+        self.list_wheel %= 120;
+        if steps == 0 || self.list_start.saturating_add_signed(steps).min(self.shown.len().saturating_sub(self.list_len)) == self.list_start { return; }
+        self.close_palette();
+        self.layout_stack(false, steps);
     }
     /// frames run from the message loop, one per screen refresh (see main); the timer only keeps
     /// them going inside modal loops (window drag, menus), where our loop does not run
@@ -1988,16 +2317,15 @@ impl App {
             a.cur.lerp(&a.to.clone(), k, ko);
             if a.cur.near(&a.to) { a.cur = a.to; } else { settled = false; }
         }
-        // note colours ease to the chosen one
-        let ids: Vec<String> = self.notes.iter().map(|n| n.id.clone()).collect();
-        for id in ids {
-            let to = split(self.target_color(&id));
+        // Only cards participating in this frame need colour updates.
+        for id in self.anims.keys().filter(|id| *id != SEARCH && *id != SETTINGS) {
+            let to = split(self.target_color(id));
             let c = self.colors.entry(id.clone()).or_insert(to);
             let mut moved = false;
             for i in 0..3 { if (c[i] - to[i]).abs() > 0.4 { c[i] += (to[i] - c[i]) * kc; moved = true; } else { c[i] = to[i]; } }
             if moved { settled = false; }
             let now_c = join(*c);
-            if id == self.cur && (moved || now_c == join(to)) && self.edit_visible {
+            if id == &self.cur && (moved || now_c == join(to)) && self.edit_visible {
                 SendMessageW(self.edit, EM_SETBKGNDCOLOR, WPARAM(0), LPARAM(bgr(now_c) as isize));
             }
         }
@@ -2038,11 +2366,15 @@ impl App {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
             self.slide = (Ease::at(0.0), Ease::at(0.0));
             self.place_slide();
-            let id = self.front_id();
-            if let Some(a) = self.anims.get_mut(&id) { a.to = V { y: 0.0, sc: 1.0, h: eh(), o: 1.0, ..Default::default() }; a.cur = a.to; }
+            if self.mode == Mode::Edit {
+                let id = self.front_id();
+                if let Some(a) = self.anims.get_mut(&id) { a.to = V { y: 0.0, sc: 1.0, h: eh(), o: 1.0, ..Default::default() }; a.cur = a.to; }
+            }
             if self.demo { self.demo = false; self.appear(); }
             return;
         }
+        self.anims.retain(|id, a| id == SEARCH || id == SETTINGS || a.cur.o > 0.0 || a.to.o > 0.0);
+        self.trim_stack_cache();
         if self.mode == Mode::Edit && !self.edit_visible && self.press_size.is_none() && !self.settings
             && IsWindowVisible(self.hwnd).as_bool() { self.reveal_edit(); }
         else { self.set_region(); }
@@ -2063,6 +2395,7 @@ impl App {
         self.set_region();
     }
     unsafe fn hide_edit(&mut self) {
+        self.close_edit_menu();
         if self.edit_visible {
             let _ = ShowWindow(self.edit, SW_HIDE);
             self.edit_visible = false;
@@ -2179,7 +2512,11 @@ impl App {
         self.win_y_to = self.win_y;
         self.win_x = wr.left as f32;
         self.win_x_to = self.win_x;
-        if self.mode != Mode::Edit { self.edit_top += wr.top - start; return; }
+        if self.mode != Mode::Edit {
+            self.edit_top += wr.top - start;
+            self.layout_stack(false, 0);
+            return;
+        }
         let work = self.work_area();
         let s = self.scale;
         let (w, hf) = ((ww() * s).round() as i32, (eh() * s).round() as i32);
@@ -2256,6 +2593,8 @@ impl App {
         self.mode = Mode::List;
         self.list_q.clear();
         self.sel = 0;
+        self.list_start = 0;
+        self.list_wheel = 0;
         self.hover_tab = false;
         self.tab_hl.to = 0.0;
         self.hide_edit();
@@ -2328,8 +2667,6 @@ impl App {
             self.enter_list();
         } else {
             self.retarget();
-            self.sel = self.sel.min(self.shown.len().saturating_sub(1));
-            self.retarget();
         }
     }
     /// the delete binding: the open note, or the picked folder in the drawer
@@ -2350,6 +2687,8 @@ impl App {
         self.notes.push(n);
         self.list_q.clear();
         self.sel = 0;
+        self.list_start = 0;
+        self.list_wheel = 0;
         self.retarget_with(true);
         true
     }
@@ -2446,6 +2785,7 @@ impl App {
         self.finish_unfold();
         self.save_now();
         self.close_palette();
+        self.close_edit_menu();
         self.end_capture();
         if !IsWindowVisible(self.hwnd).as_bool() { return; }
         if self.mode == Mode::List && self.fades() { let _ = ShowWindow(self.hwnd, SW_HIDE); self.ctl_a = Ease::at(0.0); return; }
@@ -2479,7 +2819,8 @@ impl App {
     fn query(&mut self) -> &mut Vec<u16> { if self.finding { &mut self.find_q } else { &mut self.list_q } }
     unsafe fn query_changed(&mut self) {
         self.caret_on = true;
-        if self.finding { self.find_hits(true); } else { self.sel = 0; self.retarget(); }
+        if self.finding { self.find_hits(true); }
+        else { self.sel = 0; self.list_start = 0; self.list_wheel = 0; self.retarget(); }
         self.invalidate();
     }
     unsafe fn paste(&mut self) {
@@ -2571,11 +2912,12 @@ impl App {
         let mut y = EDIT_TOP;
         let px0 = PAD - 1.0; // RichEdit's text starts one pixel left of its box
         let lay = |s: &[u16], f: &IDWriteTextFormat, w: f32| self.dw.CreateTextLayout(s, f, w, 2000.0);
-        let title = u(n.title());
+        let (title, marked) = md::preview(n.title());
         if !title.is_empty() {
             let l = lay(&title, &self.fonts.head, tw)?;
             let mut m = DWRITE_TEXT_METRICS::default(); l.GetMetrics(&mut m)?;
-            out.push(PreviewLine { x: px0, y, layout: l, title: true, marker: None });
+            let highlights = preview_highlights(&l, marked);
+            out.push(PreviewLine { x: px0, y, layout: l, highlights, title: true, marker: None });
             y += m.height.max(lh_title()) + gap_title();
         } else { y += lh_title() + gap_title(); }
         let lines = n.body_lines();
@@ -2589,8 +2931,7 @@ impl App {
             let (k, txt) = store::marker(line);
             let task = store::task(k, txt);
             let txt = task.map_or(txt, |(_, rest)| rest);
-            let shown = if fence { txt.to_string() } else { md::strip(txt) };
-            let txt = shown.as_str();
+            let (text, marked) = if fence { (u(txt), Vec::new()) } else { md::preview(txt) };
             let next_list = lines.get(i + 1).is_some_and(|line| {
                 let (kind, text) = store::marker(line);
                 kind != Kind::Plain && store::task(kind, text).is_none()
@@ -2604,13 +2945,13 @@ impl App {
                 (Kind::Number, None) => Some(PreviewMarker::List(lay(&u(&format!("{num}.")), &self.fonts.body, 26.0 * ts())?)),
                 (Kind::Plain, None) => None,
             };
-            let text = u(txt);
             let l = lay(&text, &self.fonts.body, tw - indent)?;
             if matches!(marker, Some(PreviewMarker::Task(true))) && !text.is_empty() {
                 l.SetStrikethrough(true, DWRITE_TEXT_RANGE { startPosition: 0, length: text.len() as u32 })?;
             }
             let mut m = DWRITE_TEXT_METRICS::default(); l.GetMetrics(&mut m)?;
-            out.push(PreviewLine { x: px0 + indent, y, layout: l, title: false, marker });
+            let highlights = preview_highlights(&l, marked);
+            out.push(PreviewLine { x: px0 + indent, y, layout: l, highlights, title: false, marker });
             y += m.height.max(lh_body()) + if k != Kind::Plain && task.is_none() && next_list { gap_list() } else { gap_body() };
         }
         let v: PreviewLines = out.into();
@@ -2622,11 +2963,15 @@ impl App {
         let lines = self.preview_lines(n)?;
         let (head, body) = (self.brush(t, ink(), o)?, self.brush(t, ink2(), o)?);
         let done = self.brush(t, ink3(), o)?;
+        let highlight = self.brush(t, highlight_c(), o)?;
         let px0 = PAD + RE_DX;
         let size = TASK_BOX * ts();
         let opts = D2D1_DRAW_TEXT_OPTIONS_NO_SNAP;
         t.PushAxisAlignedClip(&rect(1.0, T + 1.0, w - 1.0, h - 4.0), D2D1_ANTIALIAS_MODE_ALIASED);
         for line in lines.iter().take_while(|line| line.y <= h) {
+            for r in &line.highlights {
+                t.FillRectangle(&rect(line.x + r.left, line.y + r.top, line.x + r.right, line.y + r.bottom), &highlight);
+            }
             let brush = match &line.marker {
                 Some(PreviewMarker::Task(checked)) => {
                     let top = line.y + lh_body() / 2.0 + 2.0 * ts() - size / 2.0;
@@ -2688,7 +3033,10 @@ impl App {
         if is_search {
             self.tab_input(t, &base, &self.list_q, if self.undo.is_some() { ui::NOTE_DELETED.get() } else { ui::SEARCH_NOTES.get() }, o)?;
             let total = self.notes.len();
-            let label = if self.list_q.is_empty() { total.to_string() } else { format!("{}/{total}", self.shown.len()) };
+            let count = self.shown.len();
+            let label = if count > self.list_len {
+                format!("{}–{}/{count}", self.list_start + 1, self.list_start + self.list_len)
+            } else if self.list_q.is_empty() { total.to_string() } else { format!("{count}/{total}") };
             self.text(t, &u(&label), &self.fonts.count, rect(bx, 0.0, bx + DARK_SEARCH, T + 1.0), on_dark(), o)?;
             if self.shown.is_empty() && !self.list_q.is_empty() {
                 let msg = ui::NO_RESULTS.get().replace("{query}", String::from_utf16_lossy(&self.list_q).trim());
@@ -2698,7 +3046,7 @@ impl App {
         }
         if id == SETTINGS {
             self.text(t, &u(ui::SETTINGS.get()), &self.fonts.tab, rect(tab_text_x(), 1.0, bx - 6.0, T + 1.0), ink(), o)?;
-            return self.draw_settings(t, o);
+            return self.draw_settings(t, &base, o);
         }
         let Some(n) = note else { return Ok(()) };
         if current_edit && self.finding {
@@ -2717,7 +3065,8 @@ impl App {
                 // the tab reacts to the pointer: a click opens the drawer, a drag moves the window
                 t.FillRoundedRectangle(&rrect(x2 + 5.0, 5.0, bx - 5.0, T - 4.0, 9.0), &self.brush(t, ink(), 0.07 * self.tab_hl.v * o)?);
             }
-            let title = if n.title().is_empty() { u(ui::UNTITLED.get()) } else { u(n.title()) };
+            let title = if self.prefs.simple_editor { md::preview(n.title()).0 } else { u(n.title()) };
+            let title = if title.is_empty() { u(ui::UNTITLED.get()) } else { title };
             self.text(t, &title, &self.fonts.tab, rect(tab_text_x(), 1.0, bx - 6.0, T + 1.0), ink(), o)?;
             if current_edit {
                 self.icon(t, &base, &self.icons.plus, bx + self.dark.v / 2.0, T / 2.0, 15.0 * self.plus_sc.v, 2.8, on_dark(), o)?;
@@ -2859,6 +3208,7 @@ impl App {
             0 => {
                 let languages = LANGUAGES.into_iter().map(|lang| seg(lang.map_or_else(|| ui::SYSTEM_LANGUAGE.get(), Language::name), lang == p.language)).collect();
                 rows.push((ui::LANGUAGE.get().into(), Row::Language, languages));
+                rows.push((ui::EDITOR.get().into(), Row::Editor, vec![seg("Markdown", !p.simple_editor), seg(ui::SIMPLE.get(), p.simple_editor)]));
                 rows.push(theme());
                 rows.push((ui::TEXT_SIZE.get().into(), Row::Scale, vec![glyph(1), Seg { value: true, ..seg(format!("{}%", p.scale), false) }, glyph(2)]));
                 rows.push((ui::APPEARANCE.get().into(), Row::Dir, vec![seg(ui::BOTTOM.get(), p.dir == 0), seg(ui::RIGHT.get(), p.dir == 1), seg(ui::LEFT.get(), p.dir == 2), seg(ui::TOP.get(), p.dir == 3), seg(ui::IN_PLACE.get(), p.dir == 4)]));
@@ -2892,13 +3242,63 @@ impl App {
         let base = match self.set_page { 1 => 250.0, 2 => 130.0, _ => SET_LABEL };
         if width() < 640.0 { base * 0.8 } else { base }
     }
+    fn set_row_height(&self) -> f32 { if self.set_page == 1 { 37.0 } else { SET_ROW } }
+    fn set_body_top(&self) -> f32 { SET_TOP + self.set_row_height() + 14.0 }
+    fn set_body_bottom(&self) -> f32 { eh() - SET_BOTTOM }
+    fn set_scroll_max(&self, end: f32) -> f32 {
+        let extra = match self.set_page {
+            1 => 52.0,
+            2 if self.pick.is_some() => 172.0,
+            _ => 30.0,
+        };
+        (end + extra - self.set_body_bottom()).max(0.0)
+    }
+    fn set_offset(&self, end: f32) -> f32 { self.set_scroll.min(self.set_scroll_max(end)) }
+    fn set_thumb(&self, end: f32) -> Option<(f32, f32)> {
+        let max = self.set_scroll_max(end);
+        if max == 0.0 { return None; }
+        let h = self.set_body_bottom() - self.set_body_top();
+        let size = (h * h / (h + max)).max(18.0);
+        Some((self.set_body_top() + (h - size) * self.set_offset(end) / max, size))
+    }
+    unsafe fn begin_settings_scroll(&mut self, x: f32, y: f32) -> bool {
+        if !self.set_visible() || !(width() - 20.0..width() - GRIP).contains(&x)
+            || !(self.set_body_top()..self.set_body_bottom()).contains(&y) { return false; }
+        let Some((top, size)) = self.set_thumb(self.set_geom().1) else { return false; };
+        let grab = if (top..top + size).contains(&y) { y - top } else { size / 2.0 };
+        self.set_scroll_drag = Some(grab);
+        self.drag_settings_scroll(y, grab);
+        true
+    }
+    unsafe fn drag_settings_scroll(&mut self, y: f32, grab: f32) {
+        let end = self.set_geom().1;
+        let Some((_, size)) = self.set_thumb(end) else { return };
+        let top = self.set_body_top();
+        let travel = self.set_body_bottom() - top - size;
+        self.set_scroll = ((y - grab - top) / travel).clamp(0.0, 1.0) * self.set_scroll_max(end);
+        self.hover_set = None;
+        self.invalidate();
+    }
+    unsafe fn scroll_settings(&mut self, dy: f32) {
+        let end = self.set_geom().1;
+        self.set_scroll = (self.set_offset(end) + dy).clamp(0.0, self.set_scroll_max(end));
+        self.hover_set = None;
+        self.invalidate();
+    }
+    fn show_setting(&mut self, top: f32, bottom: f32, end: f32) {
+        let offset = self.set_offset(end);
+        let target = if top - offset < self.set_body_top() { top - self.set_body_top() }
+            else if bottom - offset > self.set_body_bottom() { bottom - self.set_body_bottom() }
+            else { offset };
+        self.set_scroll = target.clamp(0.0, self.set_scroll_max(end));
+    }
     /// the rows laid out: label, controls block, each part's box; and where the rows end.
     /// A block that does not fit beside its label moves under it.
     unsafe fn set_geom(&self) -> (Vec<RowG>, f32) {
         let mut out = vec![];
         let mut y = SET_TOP;
-        // ten bindings need a little less room per row to fit the default window
-        let rh = if self.set_page == 1 { 39.0 } else { SET_ROW };
+        // The shortcut rows are shorter so they fit in the default window.
+        let rh = self.set_row_height();
         let small = |s: &str| self.text_w(&u(s), &self.fonts.small);
         for (label, row, segs) in self.set_rows() {
             let st = style(row);
@@ -2931,9 +3331,13 @@ impl App {
     fn set_visible(&self) -> bool { self.settings && self.mode == Mode::Edit && self.anims.get(SETTINGS).map_or(false, |a| a.cur.o > 0.6) }
     unsafe fn set_hit(&self, x: f32, y: f32) -> Option<(usize, usize)> {
         if !self.set_visible() { return None; }
-        for (r, g) in self.set_geom().0.iter().enumerate() {
+        let (rows, end) = self.set_geom();
+        let body = (self.set_body_top()..self.set_body_bottom()).contains(&y);
+        for (r, g) in rows.iter().enumerate() {
+            if (r != 0) != body { continue; }
+            let y = if body { y + self.set_offset(end) } else { y };
             for (i, (rc, s)) in g.segs.iter().enumerate() {
-                if x >= rc.left && x <= rc.right && y >= rc.top - 4.0 && y <= rc.bottom + 4.0 && rc.bottom < eh() - 6.0 && !s.value { return Some((r, i)); }
+                if x >= rc.left && x <= rc.right && y >= rc.top - 4.0 && y <= rc.bottom + 4.0 && !s.value { return Some((r, i)); }
             }
         }
         None
@@ -2951,13 +3355,43 @@ impl App {
         }
         if moved { self.start_anim(); }
     }
-    unsafe fn draw_settings(&self, t: &ID2D1HwndRenderTarget, o: f32) -> Result<()> {
-        let w = width();
+    unsafe fn draw_settings(&self, t: &ID2D1HwndRenderTarget, base: &Matrix3x2, o: f32) -> Result<()> {
         let (rows, end) = self.set_geom();
+        self.draw_setting_rows(t, &rows[..1], 0, o)?;
+        let (top, bottom) = (self.set_body_top(), self.set_body_bottom());
+        let offset = self.set_offset(end);
+        t.PushAxisAlignedClip(&rect(0.0, top, width(), bottom), D2D1_ANTIALIAS_MODE_ALIASED);
+        t.SetTransform(&mul(&shift(0.0, -offset), base));
+        let result = (|| -> Result<()> {
+            self.draw_setting_rows(t, &rows[1..], 1, o)?;
+            if self.set_page == 2 { self.draw_picker(t, end, o)?; }
+            let keys = match self.set_page {
+                0 => [Some(ui::GENERAL_HELP.get()), None],
+                1 => [Some(ui::SHORTCUT_HELP.get()), Some(ui::GLOBAL_HELP.get())],
+                2 if self.pick.is_none() => [Some(ui::COLOR_HELP.get()), None],
+                _ => [None, None],
+            };
+            for (k, line) in keys.into_iter().flatten().enumerate() {
+                let y = end + 10.0 + k as f32 * 22.0;
+                self.text(t, &u(line), &self.fonts.small, rect(PAD, y, width() - PAD, y + 20.0), ink3(), o)?;
+            }
+            Ok(())
+        })();
+        t.SetTransform(base);
+        t.PopAxisAlignedClip();
+        result?;
+        if let Some((y, thumb)) = self.set_thumb(end) {
+            let x = width() - 12.0;
+            t.FillRoundedRectangle(&rrect(x, y, x + 4.0, y + thumb, 2.0), &self.brush(t, ink2(), 0.4 * o)?);
+        }
+        Ok(())
+    }
+    unsafe fn draw_setting_rows(&self, t: &ID2D1HwndRenderTarget, rows: &[RowG], first: usize, o: f32) -> Result<()> {
+        let w = width();
         let lw = self.set_label_w();
         let focus = if self.kb_focus { Some(self.focus) } else { None };
-        for (r, g) in rows.iter().enumerate() {
-            if g.block.bottom > eh() - 6.0 { break; }
+        for (i, g) in rows.iter().enumerate() {
+            let r = first + i;
             if !g.label.is_empty() { self.text(t, &u(&g.label), &self.fonts.input, rect(PAD, g.top, PAD + lw - 10.0, g.top + g.h), ink2(), o)?; }
             let st = style(g.row);
             let b = g.block;
@@ -3040,18 +3474,6 @@ impl App {
                 if self.hk_err == Some(i) { self.text(t, &u(ui::SHORTCUT_TAKEN.get()), &self.fonts.small, rect(b.right + 12.0, b.top, w - PAD, b.bottom), ink3(), o)?; }
             }
         }
-        if self.set_page == 2 { self.draw_picker(t, end, o)?; }
-        let keys = match self.set_page {
-            0 => [Some(ui::GENERAL_HELP.get()), None],
-            1 => [Some(ui::SHORTCUT_HELP.get()), Some(ui::GLOBAL_HELP.get())],
-            2 if self.pick.is_none() => [Some(ui::COLOR_HELP.get()), None],
-            _ => [None, None],
-        };
-        for (k, line) in keys.into_iter().flatten().enumerate() {
-            let y = end + 10.0 + k as f32 * 22.0;
-            if y + 20.0 > eh() - 6.0 { break; }
-            self.text(t, &u(line), &self.fonts.small, rect(PAD, y, w - PAD, y + 20.0), ink3(), o)?;
-        }
         Ok(())
     }
     /// a minus (1) or plus (2) drawn as lines, so no dash character is needed
@@ -3103,6 +3525,12 @@ impl App {
             VK_TAB if ctrl => { self.turn_page(if shift { -1 } else { 1 }); }
             VK_NEXT if ctrl => self.turn_page(1),
             VK_PRIOR if ctrl => self.turn_page(-1),
+            VK_NEXT | VK_PRIOR => {
+                let distance = self.set_body_bottom() - self.set_body_top() - CTL_H;
+                self.scroll_settings(if vk == VK_NEXT.0 { distance } else { -distance });
+                self.kb_focus = false;
+                return true;
+            }
             VK_UP | VK_DOWN if on_picker && ctrl => {
                 let d = if vk == VK_UP.0 { 0.04 } else { -0.04 };
                 self.pick_hsv[2] = (self.pick_hsv[2] + d).clamp(0.0, 1.0);
@@ -3148,16 +3576,22 @@ impl App {
             _ => return false,
         }
         // keep the focus on something that exists after the rows changed
-        let rows = self.set_geom().0;
+        let (rows, end) = self.set_geom();
         let n = rows.len() + (self.pick.is_some() && self.set_page == 2) as usize;
         if self.focus.0 >= n { self.focus.0 = n.saturating_sub(1); }
         if let Some(g) = rows.get(self.focus.0) { self.focus.1 = self.focus.1.min(g.segs.len().saturating_sub(1)); }
+        if let Some(g) = rows.get(self.focus.0).filter(|g| g.row != Row::Page) {
+            self.show_setting(g.top, g.block.bottom + 4.0, end);
+        } else if self.focus.0 >= rows.len() {
+            self.show_setting(end, end + 172.0, end);
+        }
         self.kb_focus = true;
         self.invalidate();
         true
     }
     unsafe fn turn_page(&mut self, d: isize) {
         self.set_page = ((self.set_page as isize + d).rem_euclid(3)) as usize;
+        self.set_scroll = 0.0;
         self.pick = None;
         self.end_capture();
         self.focus = (0, self.set_page);
@@ -3179,7 +3613,6 @@ impl App {
     }
     unsafe fn draw_picker(&self, t: &ID2D1HwndRenderTarget, _end: f32, o: f32) -> Result<()> {
         let Some((sv, hue, cx)) = self.pick_geom() else { return Ok(()) };
-        if hue.bottom > eh() - 6.0 { return Ok(()); }
         let [h, s, v] = self.pick_hsv;
         let stop = |p: f32, c: u32, a: f32| D2D1_GRADIENT_STOP { position: p, color: rgb(c, a) };
         let grad = |stops: &[D2D1_GRADIENT_STOP], a: D2D_POINT_2F, b: D2D_POINT_2F| -> Result<ID2D1LinearGradientBrush> {
@@ -3222,12 +3655,14 @@ impl App {
     }
     unsafe fn pick_hit(&self, x: f32, y: f32) -> Option<u8> {
         let (sv, hue, _) = self.pick_geom()?;
-        if !self.set_visible() { return None; }
+        if !self.set_visible() || !(self.set_body_top()..self.set_body_bottom()).contains(&y) { return None; }
+        let y = y + self.set_offset(self.set_geom().1);
         let inr = |r: &D2D_RECT_F, m: f32| x >= r.left - m && x <= r.right + m && y >= r.top - m && y <= r.bottom + m;
         if inr(&sv, 6.0) { Some(0) } else if inr(&hue, 6.0) { Some(1) } else { None }
     }
     unsafe fn pick_drag(&mut self, part: u8, x: f32, y: f32) {
         let Some((sv, hue, _)) = self.pick_geom() else { return };
+        let y = y + self.set_offset(self.set_geom().1);
         let fx = |r: &D2D_RECT_F| ((x - r.left) / (r.right - r.left)).clamp(0.0, 1.0);
         if part == 0 { self.pick_hsv[1] = fx(&sv); self.pick_hsv[2] = 1.0 - ((y - sv.top) / (sv.bottom - sv.top)).clamp(0.0, 1.0); }
         else { self.pick_hsv[0] = fx(&hue) * 359.9; }
@@ -3243,6 +3678,8 @@ impl App {
         self.pick = Some(p);
         self.pick_hsv = rgb_hsv(self.pick_color());
         self.pick_hex.clear();
+        let end = self.set_geom().1;
+        self.show_setting(end, end + 147.0, end);
     }
     /// the edited colour changes; while dragging only the look updates, the rest happens on release
     unsafe fn set_pick_color(&mut self, c: u32, done: bool) {
@@ -3276,8 +3713,9 @@ impl App {
         let k = theme_kind(&p);
         let mut demo = false;
         match *row {
-            Row::Page => { self.set_page = i; self.pick = None; self.end_capture(); self.focus = (0, i); }
+            Row::Page => { self.set_page = i; self.set_scroll = 0.0; self.pick = None; self.end_capture(); self.focus = (0, i); }
             Row::Language => p.language = LANGUAGES[i],
+            Row::Editor => p.simple_editor = i == 1,
             Row::Theme => { p.theme = i as u8; self.pick = None; }
             Row::Scale => p.scale = if i == 0 { p.scale.saturating_sub(10).max(80) } else { (p.scale + 10).min(160) },
             Row::Dir => { p.dir = i as u8; demo = true; }
@@ -3321,6 +3759,7 @@ impl App {
         }
         if old.theme != p.theme || old.cards != p.cards || old.ink != p.ink || old.accent != p.accent || old.ncards != p.ncards { self.apply_theme(); }
         if old.scale != p.scale { self.apply_scale(); }
+        if old.simple_editor != p.simple_editor { self.restyle(); self.invalidate(); }
     }
     unsafe fn apply_theme(&mut self) {
         TH_ = make_theme(&self.prefs);
@@ -3351,6 +3790,7 @@ impl App {
         if self.finding { self.close_find(); }
         if self.mode == Mode::List { self.mode = Mode::Edit; let _ = KillTimer(self.hwnd, TIMER_CARET); self.update_docked(); }
         self.settings = true;
+        self.set_scroll = 0.0;
         self.ctl_open = true;
         self.end_capture();
         self.hk_err = None;
@@ -3377,6 +3817,7 @@ impl App {
             7 => { let _ = DestroyWindow(self.hwnd); }
             8 => self.palette_by_key(),
             9 => self.delete_by_key(),
+            10 => self.toggle_format(md::Format::Highlight),
             _ => {}
         }
     }
@@ -3539,18 +3980,46 @@ impl App {
         let k = ((width() - x + 1.0) / 34.0).floor();
         if k >= 0.0 && (k as usize) < self.controls().len() { Some(k as usize) } else { None }
     }
-    /// which folder edges are under the pointer (editor only)
+    /// The tab and the two shoulders form the visible upper edge of the folder.
     fn edge_at(&self, x: f32, y: f32) -> u8 {
-        if self.mode != Mode::Edit || !self.edit_visible || self.finding { return 0; }
+        if self.mode != Mode::Edit || (!self.edit_visible && !self.set_visible()) || self.finding { return 0; }
         let (w, h) = (width(), eh());
-        if y < T + R || y > h + 1.0 || x < -1.0 || x > w + 1.0 { return 0; }
+        if y < -1.0 || y > h + 1.0 || x < -1.0 || x > w + 1.0 { return 0; }
+        let (tab, tab_end) = tab_x();
+        let tab_end = tab_end + if self.settings { 0.0 } else { self.dark.v };
+        let corner = (T - 1.0..T + R + 1.0).contains(&y);
+        let upper_left = corner && x < R + GRIP;
+        let upper_right = corner && x > w - R - GRIP;
+        let tab_top = y < GRIP && (tab..tab_end).contains(&x);
+        let shoulder = (T - 1.0..T + GRIP).contains(&y) && (x < tab - F || x > tab_end + F);
         let mut e = 0;
-        if x < GRIP && self.docks & 1 == 0 { e |= 1; }
-        if x > w - GRIP && self.docks & 2 == 0 { e |= 2; }
+        if (upper_left || (y >= T + R && x < GRIP)) && self.docks & 1 == 0 { e |= 1; }
+        if (upper_right || (y >= T + R && x > w - GRIP)) && self.docks & 2 == 0 { e |= 2; }
         if y > h - GRIP && self.docks & 4 == 0 { e |= 4; }
+        if tab_top || shoulder || upper_left || upper_right { e |= 8; }
         e
     }
-    unsafe fn resize_to(&mut self, left: i32, w: f32, h: f32) {
+    unsafe fn resize_drag(&mut self, origin: POINT, bounds: RECT, edge: u8, pointer: POINT) {
+        let work = self.work_area();
+        let s = self.scale;
+        let dx = (pointer.x - origin.x) as f32 / s;
+        let dy = (pointer.y - origin.y) as f32 / s;
+        let w0 = (bounds.right - bounds.left) as f32 / s;
+        let h0 = (bounds.bottom - bounds.top) as f32 / s - PADB;
+        let w = if edge & 3 == 0 { w0 } else {
+            let delta = if edge & 1 != 0 { -dx } else { dx };
+            (w0 + delta).clamp(MIN_W, ((work.right - work.left) as f32 / s).max(MIN_W))
+        };
+        let h = if edge & 8 != 0 {
+            (h0 - dy).clamp(MIN_H, ((bounds.bottom - work.top) as f32 / s - PADB).max(h0).max(MIN_H))
+        } else if edge & 4 != 0 {
+            (h0 + dy).clamp(MIN_H, ((work.bottom - bounds.top) as f32 / s).max(h0).max(MIN_H))
+        } else { h0 };
+        let left = if edge & 1 != 0 { bounds.right - (w * s).round() as i32 } else { bounds.left };
+        let top = if edge & 8 != 0 { bounds.bottom - ((h + PADB) * s).round() as i32 } else { bounds.top };
+        self.resize_to(left, top, w, h);
+    }
+    unsafe fn resize_to(&mut self, left: i32, top: i32, w: f32, h: f32) {
         self.finish_unfold();
         self.edit_snapshot = None;
         let pics = (w - ww()).abs() > 0.5 && self.pstyle.iter().any(|p| matches!(p.kind, PK::Image(..)));
@@ -3564,9 +4033,10 @@ impl App {
         if let Some(a) = self.anims.get_mut(SETTINGS) { a.to.h = h; a.cur.h = h; }
         self.win_h = h + PADB;
         self.win_h_to = self.win_h;
-        let mut wr = RECT::default();
-        let _ = GetWindowRect(self.hwnd, &mut wr);
-        let _ = SetWindowPos(self.hwnd, None, left, wr.top, px(w), px(self.win_h), SWP_NOZORDER | SWP_NOACTIVATE);
+        self.win_y = top as f32;
+        self.win_y_to = self.win_y;
+        self.edit_top = top;
+        let _ = SetWindowPos(self.hwnd, None, left, top, px(w), px(self.win_h), SWP_NOZORDER | SWP_NOACTIVATE);
         if let Some(t) = &self.target { let _ = t.Resize(&D2D_SIZE_U { width: px(w) as u32, height: px(self.win_h) as u32 }); }
         let _ = RedrawWindow(self.hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
     }
@@ -3586,7 +4056,7 @@ impl App {
     }
     fn folder_at(&self, x: f32, y: f32) -> Option<String> {
         let (x2, bx) = tab_x();
-        let mut items: Vec<(i32, &String)> = self.anims.iter().filter(|(_, a)| a.cur.o > 0.5).map(|(k, a)| (a.z, k)).collect();
+        let mut items: Vec<(i32, &String)> = self.anims.iter().filter(|(_, a)| a.cur.o > 0.5 && a.to.o > 0.0).map(|(k, a)| (a.z, k)).collect();
         items.sort_by(|a, b| b.0.cmp(&a.0));
         for (_, id) in items {
             let v = &self.anims[id].cur;
@@ -3617,7 +4087,10 @@ impl App {
             let fb = self.find_btn(x, y);
             if fb != self.hover_fbtn { self.hover_fbtn = fb; self.invalidate(); }
         } else if let Some(id) = self.folder_at(x, y).filter(|_| self.mouse_moved) {
-            if let Some(i) = self.shown.iter().position(|s| *s == id) { if i != self.sel { self.sel = i; self.retarget(); } }
+            if let Some(i) = self.shown[self.list_start..self.list_start + self.list_len].iter().position(|s| *s == id) {
+                let i = i + self.list_start;
+                if i != self.sel { self.sel = i; self.layout_stack(false, 0); }
+            }
         }
         if changed { self.start_anim(); }
     }
@@ -3639,6 +4112,7 @@ unsafe fn cur_mods() -> u32 {
 }
 /// window-wide keys, checked before the focused control sees them
 unsafe fn shortcut(a: &mut App, k: usize, mods: u32) -> bool {
+    if a.edit_menu_key(k as u16) { return true; }
     if k == VK_ESCAPE.0 as usize {
         if a.palette.is_some() { a.close_palette(); }
         else if a.pick.is_some() { a.pick = None; a.invalidate(); }
@@ -3660,6 +4134,20 @@ unsafe fn shortcut(a: &mut App, k: usize, mods: u32) -> bool {
     for i in 2..KEYS {
         let (m, vk) = a.prefs.keys[i];
         if vk != 0 && vk as usize == k && m == mods { a.action(i); return true; }
+    }
+    if a.prefs.simple_editor && a.edit_visible && GetFocus() == a.edit {
+        if (mods, k as u16) == (0, VK_APPS.0) || (mods, k as u16) == (4, VK_F10.0) {
+            a.edit_menu(LPARAM(-1));
+            return true;
+        }
+        if (mods, k as u32) == (2, b'X' as u32) || (mods, k as u32) == (4, VK_DELETE.0 as u32) {
+            SendMessageW(a.edit, WM_CUT, WPARAM(0), LPARAM(0));
+            return true;
+        }
+        if let Some((format, _, _)) = SIMPLE_FORMATS.into_iter().find(|&(_, _, binding)| binding == (mods, k as u32)) {
+            a.toggle_format(format);
+            return true;
+        }
     }
     false
 }
@@ -3727,11 +4215,43 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
     unsafe {
         let old: WNDPROC = std::mem::transmute(OLD_EDIT);
         if let Some(a) = app() {
+            if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_MOUSEWHEEL | WM_KILLFOCUS) {
+                a.close_edit_menu();
+            }
+            if !(msg == WM_KEYDOWN && wp.0 == VK_BACK.0 as usize) {
+                if let Some(result) = a.simple_edit_key(msg, wp, lp) { return result; }
+            }
             match msg {
+                WM_RBUTTONUP if a.prefs.simple_editor && a.edit_visible => {
+                    if GetCapture() == hwnd { let _ = ReleaseCapture(); }
+                    let mut pt = POINT { x: lp.0 as i16 as i32, y: (lp.0 >> 16) as i16 as i32 };
+                    let _ = ClientToScreen(hwnd, &mut pt);
+                    a.edit_menu(lp_from(pt));
+                    return LRESULT(0);
+                }
+                WM_CONTEXTMENU if a.prefs.simple_editor && a.edit_visible => { a.edit_menu(lp); return LRESULT(0); }
                 WM_PASTE => { a.edit_paste(); return LRESULT(0); }
                 WM_DROPFILES => { a.drop_files(HDROP(wp.0 as _)); return LRESULT(0); }
                 WM_MOUSEWHEEL if wp.0 & 0x0008 == 0 => { a.scroll_wheel(wp); return LRESULT(0); }
                 WM_LBUTTONDOWN if a.edit_click(lp) => return LRESULT(0),
+                WM_ERASEBKGND if a.edit_visible => return LRESULT(1),
+                WM_PAINT if a.edit_visible => {
+                    let mut ps = PAINTSTRUCT::default();
+                    let target = BeginPaint(hwnd, &mut ps);
+                    if !target.is_invalid() && ps.rcPaint.left < ps.rcPaint.right && ps.rcPaint.top < ps.rcPaint.bottom {
+                        let mut dc = HDC::default();
+                        let buffer = BeginBufferedPaint(target, &ps.rcPaint, BPBF_COMPATIBLEBITMAP, None, &mut dc);
+                        if buffer == 0 { dc = target; }
+                        let paper = CreateSolidBrush(COLORREF(bgr(a.shown_color(&a.cur))));
+                        FillRect(dc, &ps.rcPaint, paper);
+                        let _ = DeleteObject(paper);
+                        CallWindowProcW(old, hwnd, WM_PRINTCLIENT, WPARAM(dc.0 as usize), LPARAM(PRF_CLIENT as isize));
+                        a.draw_marks_on(dc);
+                        if buffer != 0 { let _ = EndBufferedPaint(buffer, true); }
+                    }
+                    let _ = EndPaint(hwnd, &ps);
+                    return LRESULT(0);
+                }
                 WM_SETCURSOR if a.edit_hand() => {
                     if let Ok(c) = LoadCursorW(None, IDC_HAND) { SetCursor(c); }
                     return LRESULT(1);
@@ -3739,13 +4259,7 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 _ => {}
             }
         }
-        if msg != WM_PAINT { return CallWindowProcW(old, hwnd, msg, wp, lp); }
-        let rgn = CreateRectRgn(0, 0, 0, 0);
-        GetUpdateRgn(hwnd, rgn, false);
-        let r = CallWindowProcW(old, hwnd, msg, wp, lp);
-        if let Some(a) = app() { a.draw_marks(rgn); }
-        let _ = DeleteObject(rgn);
-        r
+        CallWindowProcW(old, hwnd, msg, wp, lp)
     }
 }
 unsafe fn ink_dc() -> HDC {
@@ -3763,6 +4277,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     unsafe {
         let Some(a) = app() else { return DefWindowProcW(hwnd, msg, wp, lp) };
         match msg {
+            WM_MOUSEWHEEL if a.mode == Mode::List => { a.scroll_list(wp); LRESULT(0) }
+            WM_MOUSEWHEEL if a.settings => {
+                a.scroll_settings(-f32::from((wp.0 >> 16) as i16) * 0.4);
+                LRESULT(0)
+            }
             WM_MOUSEWHEEL if a.edit_visible && wp.0 & 0x0008 == 0 => {
                 a.scroll_wheel(wp);
                 LRESULT(0)
@@ -3782,7 +4301,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     let _ = GetCursorPos(&mut p);
                     let (x, y) = a.dips(lp_from(p), true);
                     let e = if a.press_size.is_some() { a.press_size.as_ref().unwrap().2 } else { a.edge_at(x, y) };
-                    let id = match e { 1 | 2 => IDC_SIZEWE, 4 => IDC_SIZENS, 5 => IDC_SIZENESW, 6 => IDC_SIZENWSE, _ => if a.hand_at(x, y) { IDC_HAND } else { IDC_ARROW } };
+                    let id = match e { 1 | 2 => IDC_SIZEWE, 4 | 8 => IDC_SIZENS, 5 | 10 => IDC_SIZENESW, 6 | 9 => IDC_SIZENWSE, _ => if a.hand_at(x, y) { IDC_HAND } else { IDC_ARROW } };
                     if let Ok(c) = LoadCursorW(None, id) { SetCursor(c); }
                     return LRESULT(1);
                 }
@@ -3809,9 +4328,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 a.win_y = wr.top as f32;
                 a.win_y_to = a.win_y;
                 a.update_docked();
+                if a.mode == Mode::List { a.layout_stack(false, 0); }
                 LRESULT(0)
             }
-            WM_ACTIVATE => { if wp.0 & 0xffff == 0 { a.close_palette(); } LRESULT(0) }
+            WM_ACTIVATE => { if wp.0 & 0xffff == 0 { a.close_palette(); a.close_edit_menu(); } LRESULT(0) }
             WM_MOUSEMOVE => {
                 if !a.tracking {
                     let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
@@ -3819,22 +4339,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     a.tracking = true;
                 }
                 if let Some(part) = a.press_pick { let (x, y) = a.dips(lp, false); a.pick_drag(part, x, y); return LRESULT(0); }
+                if let Some(grab) = a.set_scroll_drag {
+                    let (_, y) = a.dips(lp, false);
+                    a.drag_settings_scroll(y, grab);
+                    return LRESULT(0);
+                }
                 // a press on the tab that starts moving becomes a window drag
                 if let Some((c0, r0, e)) = a.press_size {
                     let mut p = POINT::default();
                     let _ = GetCursorPos(&mut p);
-                    let work = a.work_area();
-                    let s = a.scale;
-                    let (dx, dy) = (p.x - c0.x, p.y - c0.y);
-                    let w0 = (r0.right - r0.left) as f32 / s;
-                    let mut w = w0;
-                    if e & 1 != 0 { w -= dx as f32 / s; }
-                    if e & 2 != 0 { w += dx as f32 / s; }
-                    let w = w.clamp(MIN_W, (work.right - work.left) as f32 / s);
-                    let mut h = eh();
-                    if e & 4 != 0 { h = ((r0.bottom - r0.top) as f32 / s - PADB + dy as f32 / s).clamp(MIN_H, (work.bottom - r0.top) as f32 / s); }
-                    let left = if e & 1 != 0 { r0.right - (w * s).round() as i32 } else { r0.left };
-                    a.resize_to(left, w, h);
+                    a.resize_drag(c0, r0, e, p);
                     return LRESULT(0);
                 }
                 if let Some((p0, _)) = &a.press_folder {
@@ -3878,9 +4392,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
+                a.close_edit_menu();
                 let (x, y) = a.dips(lp, false);
                 let e = a.edge_at(x, y);
                 if e != 0 {
+                    a.finish_unfold();
+                    a.x_glide = false;
                     let (mut c, mut r) = (POINT::default(), RECT::default());
                     let _ = GetCursorPos(&mut c);
                     let _ = GetWindowRect(hwnd, &mut r);
@@ -3890,6 +4407,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     SetCapture(hwnd);
                     return LRESULT(0);
                 }
+                if a.begin_settings_scroll(x, y) { SetCapture(hwnd); return LRESULT(0); }
                 if let Some(k) = a.control_at(x, y) {
                     if a.controls()[k] != Ctl::Dot { a.close_palette(); }
                     click_control(a, k);
@@ -3917,6 +4435,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_LBUTTONUP => {
                 let (x, y) = a.dips(lp, false);
+                if a.set_scroll_drag.take().is_some() { let _ = ReleaseCapture(); return LRESULT(0); }
                 if a.press_tab.take().is_some() { let _ = ReleaseCapture(); a.enter_list(); }
                 if a.press_pick.take().is_some() { let _ = ReleaseCapture(); let c = a.pick_color(); a.set_pick_color(c, true); }
                 if a.press_size.take().is_some() {
@@ -3928,7 +4447,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     a.win_y_to = a.win_y;
                     a.update_docked();
                     store::write_size(&a.dir, ww(), eh());
-                    a.reveal_edit();
+                    if !a.settings { a.reveal_edit(); }
                 }
                 if let Some((_, id)) = a.press_folder.take() {
                     let _ = ReleaseCapture();
@@ -3943,12 +4462,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 LRESULT(0)
             }
+            WM_CAPTURECHANGED => { a.set_scroll_drag = None; DefWindowProcW(hwnd, msg, wp, lp) }
             WM_RBUTTONDOWN => {
+                a.close_edit_menu();
                 let (x, y) = a.dips(lp, false);
                 if a.mode == Mode::List { if let Some(id) = a.folder_at(x, y) { if id != SEARCH { a.open_palette(id, x, y); } } }
                 LRESULT(0)
             }
-            WM_MOVE => { if a.palette.is_some() { a.draw_palette(); } LRESULT(0) }
+            WM_MOVE => { a.close_edit_menu(); if a.palette.is_some() { a.draw_palette(); } LRESULT(0) }
             WM_CHAR => {
                 if a.settings && a.pick.is_some() { a.pick_char(wp.0 as u16); return LRESULT(0); }
                 if !a.input_mode() || a.settings { return LRESULT(0); }
@@ -3975,8 +4496,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if a.mode == Mode::List {
                     if k == VK_DELETE.0 && !ctrl && !shift && a.palette.is_none() { a.delete_by_key(); return LRESULT(0); }
                     if k == 'Z' as u16 && ctrl && !shift { a.undo_delete(); return LRESULT(0); }
-                    if k == VK_UP.0 { a.sel = (a.sel + 1).min(a.shown.len().saturating_sub(1)); a.retarget(); }
-                    if k == VK_DOWN.0 { a.sel = a.sel.saturating_sub(1); a.retarget(); }
+                    let last = a.shown.len().saturating_sub(1);
+                    let selected = match VIRTUAL_KEY(k) {
+                        VK_UP => (a.sel + 1).min(last),
+                        VK_DOWN => a.sel.saturating_sub(1),
+                        VK_HOME => 0,
+                        VK_END => last,
+                        _ => a.sel,
+                    };
+                    if selected != a.sel { a.sel = selected; a.layout_stack(false, 0); }
                     if k == VK_RETURN.0 {
                         if let Some(id) = a.shown.get(a.sel).cloned() { a.open_note(&id); }
                         else if !a.list_q.is_empty() { let q = String::from_utf16_lossy(&a.list_q).trim().to_string(); a.new_note(&q); }
@@ -4000,6 +4528,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     TIMER_ANIM => { if a.last_frame.elapsed().as_millis() > 12 { a.frame(); } }
                     TIMER_SAVE => a.save_now(),
                     TIMER_CARET => { a.caret_on = !a.caret_on; a.invalidate(); }
+                    TIMER_EDIT_MENU => a.draw_edit_menu(),
                     TIMER_ECARET => {
                         let now = Instant::now();
                         let dt = a.car.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0).min(0.1);
@@ -4053,6 +4582,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 extern "system" fn pop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         let Some(a) = app() else { return DefWindowProcW(hwnd, msg, wp, lp) };
+        if let Some(result) = a.edit_menu_mouse(hwnd, msg, lp) { return result; }
         match msg {
             WM_MOUSEACTIVATE => LRESULT(3), // MA_NOACTIVATE
             WM_SETCURSOR => { if let Ok(c) = LoadCursorW(None, IDC_HAND) { SetCursor(c); } LRESULT(1) }
@@ -4062,19 +4592,35 @@ extern "system" fn pop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
                     let _ = TrackMouseEvent(&mut tme);
                     a.pal_tracking = true;
                 }
-                let (sw, _) = a.pal_hit(lp);
-                if sw != a.pal_hover {
-                    a.pal_hover = sw;
-                    for (i, s) in a.sw_sc.iter_mut().enumerate() { s.to = if sw == Some(i) { 1.12 } else { 1.0 }; }
+                let (action, _) = a.pal_hit(lp);
+                if action != a.pal_hover {
+                    a.pal_hover = action;
+                    for (i, s) in a.sw_sc.iter_mut().enumerate() { s.to = if action == Some(PalAction::Color(i)) { 1.12 } else { 1.0 }; }
+                    a.draw_palette();
                     a.start_anim();
                 }
                 LRESULT(0)
             }
-            0x02A3 => { a.pal_tracking = false; a.pal_hover = None; for s in a.sw_sc.iter_mut() { s.to = 1.0; } a.start_anim(); LRESULT(0) }
+            0x02A3 => {
+                a.pal_tracking = false;
+                a.pal_hover = None;
+                a.pal_delete_pressed = false;
+                for s in a.sw_sc.iter_mut() { s.to = 1.0; }
+                a.draw_palette();
+                a.start_anim();
+                LRESULT(0)
+            }
             WM_LBUTTONDOWN => {
-                let (sw, inside) = a.pal_hit(lp);
-                if let (Some(i), Some(id)) = (sw, a.palette.clone()) { a.set_color(&id, i); }
+                let (action, inside) = a.pal_hit(lp);
+                a.pal_delete_pressed = action == Some(PalAction::Delete);
+                if let (Some(PalAction::Color(i)), Some(id)) = (action, a.palette.clone()) { a.set_color(&id, i); }
                 else if !inside { a.close_palette(); }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                if std::mem::take(&mut a.pal_delete_pressed) && a.pal_hit(lp).0 == Some(PalAction::Delete) {
+                    if let Some(id) = a.palette.clone() { a.delete_note(&id); }
+                }
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -4122,6 +4668,7 @@ fn main() -> Result<()> {
 
         let instance = GetModuleHandleW(None)?;
         LoadLibraryW(w!("Msftedit.dll"))?;
+        let buffered_paint = BufferedPaintInit().is_ok();
 
         let tmp = std::env::temp_dir();
         let font_path = tmp.join("notedd-geologica.ttf");
@@ -4221,15 +4768,16 @@ fn main() -> Result<()> {
         let _ = Shell_NotifyIconW(NIM_ADD, &tray);
 
         let state = Box::new(App {
-            hwnd, edit, doc, hits_layer: Layer::new(&factory, hits, scale)?, caret_layer: Layer::new(&factory, caret, scale)?, pop: Layer::new(&factory, pop, scale)?,
+            hwnd, edit, doc, hits_layer: Layer::new(&factory, hits, scale)?, caret_layer: Layer::new(&factory, caret, scale)?, pop: Layer::new(&factory, pop, scale)?, edit_menu: None,
             factory, dw, fonts, icons, round, text_rendering, target: None, scale, dir, notes, cur: cur.clone(),
             mode: Mode::Edit, finding: false, find_q: vec![], hits: vec![], hit: 0, list_q: vec![], shown: vec![], sel: 0,
+            list_start: 0, list_len: 0, list_wheel: 0,
             anims: HashMap::new(), colors: HashMap::new(), kinds: vec![], load_kinds: None, force: None,
             win_h: eh() + PADB, win_h_to: eh() + PADB, dark: Ease::at(DARK), rb: Ease::at(R), tab_hl: Ease::at(0.0), dot_sc: Ease::at(1.0),
             plus_sc: Ease::at(1.0), pal_t: Ease::at(0.0), sw_sc: [Ease::at(1.0); MAX_CARDS],
             hover_ctl: None, hover_plus: false, hover_tab: false, hover_fbtn: None, press_tab: None, press_folder: None, press_size: None, drag0: None, press_plus: false, tracking: false,
-            palette: None, pal_anchor: (0.0, 0.0), pal_hover: None, pal_tracking: false,
-            pinned: true, docks: 0, rl: Ease::at(R), rr: Ease::at(R), win_x: 0.0, win_x_to: 0.0, x_glide: false, prefs, coll: coll.clone(), settings: false, set_page: 0, capturing: None, hk_err: None, pick: None, pick_hsv: [0.0; 3], pick_hex: vec![], press_pick: None,
+            palette: None, pal_anchor: (0.0, 0.0), pal_hover: None, pal_delete_pressed: false, pal_tracking: false,
+            pinned: true, docks: 0, rl: Ease::at(R), rr: Ease::at(R), win_x: 0.0, win_x_to: 0.0, x_glide: false, prefs, coll: coll.clone(), settings: false, set_page: 0, set_scroll: 0.0, set_scroll_drag: None, capturing: None, hk_err: None, pick: None, pick_hsv: [0.0; 3], pick_hex: vec![], press_pick: None,
             ctl_open: false, ctl_a: Ease::at(1.0), cap_n: Ease::at(4.0), more_t: Ease::at(0.0), ctl_last: vec![], ctl_prev: vec![], ctl_fade: Ease::at(1.0),
             animating: false, last_frame: Instant::now(), fps: std::env::var("PANE_FPS").ok().map(|_| (0, 0.0, 0.0, 0.0)), previews: Default::default(), seg_anim: HashMap::new(), focus: (0, 0), kb_focus: false, last_cursor: (i32::MIN, 0), mouse_moved: false,
             autostart: false, hover_set: None, demo: false, slide: (Ease::at(0.0), Ease::at(0.0)), slide_base: POINT::default(), edit_visible: false, edit_snapshot: None, suspended_scroll: None, hiding: false, guard: false, caret_on: true, tick: Instant::now(), tray,
@@ -4273,7 +4821,13 @@ fn main() -> Result<()> {
                         let (ctrl, shift) = (GetKeyState(VK_CONTROL.0 as i32) < 0, GetKeyState(VK_SHIFT.0 as i32) < 0);
                         if (ctrl && vk == 'V' as u16) || (shift && !ctrl && vk == VK_INSERT.0) { a.edit_paste(); a.sync_edit(); continue; }
                     }
-                    if msg.message == WM_KEYDOWN && msg.hwnd == a.edit && a.list_key(msg.wParam.0 as u16) { continue; }
+                    if msg.message == WM_KEYDOWN && msg.hwnd == a.edit {
+                        // RichEdit erases on keydown. Repair the range before it processes Backspace.
+                        if a.list_key(vk) || (vk == VK_BACK.0 && a.simple_edit_key(msg.message, msg.wParam, msg.lParam).is_some()) {
+                            a.sync_edit();
+                            continue;
+                        }
+                    }
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -4293,6 +4847,7 @@ fn main() -> Result<()> {
             }
         }
         timeEndPeriod(1);
+        if buffered_paint { let _ = BufferedPaintUnInit(); }
     }
     Ok(())
 }

@@ -1,6 +1,8 @@
 //! Markdown recognised in the editor: a block kind per paragraph and inline spans.
 //! Offsets are UTF-16 units, the same as RichEdit character positions.
 
+use std::{collections::HashSet, ops::Range};
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Block { Plain, Heading(u8), Quote, Fence, Code, Image(String) }
 
@@ -51,8 +53,49 @@ pub fn mark_len(line: &[u16], b: &Block) -> usize {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Style { Mark, Bold, Italic, Strike, Code, Link, Url }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Style { Mark, Bold, Italic, Strike, Highlight, Code, Link, Url }
+
+/// Opening and closing ranges around visible inline content, innermost first.
+pub fn delimiters(line: &[u16]) -> Vec<(Range<usize>, Range<usize>)> {
+    let mut pairs: Vec<_> = inline(line).0.into_iter().filter_map(|s| {
+        let width = match s.style {
+            Style::Bold | Style::Strike | Style::Highlight => 2,
+            Style::Italic | Style::Code => 1,
+            Style::Link => {
+                let start = if s.a >= 2 && starts(line, s.a - 2, "![") { s.a - 2 } else { s.a - 1 };
+                let end = (s.b + 2..line.len()).find(|&i| line[i] == b')' as u16)?;
+                return Some((start..s.a, s.b..end + 1));
+            }
+            _ => return None,
+        };
+        Some((s.a - width..s.a, s.b..s.b + width))
+    }).collect();
+    pairs.sort_unstable_by_key(|(open, close)| close.start - open.end);
+    pairs
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Format { Bold, Italic, Strike, Highlight, Code }
+
+impl Format {
+    fn style(self) -> Style {
+        match self {
+            Self::Bold => Style::Bold, Self::Italic => Style::Italic, Self::Strike => Style::Strike,
+            Self::Highlight => Style::Highlight, Self::Code => Style::Code,
+        }
+    }
+    fn markers(self) -> &'static [&'static [u16]] {
+        match self {
+            Self::Bold => &[&[42, 42], &[95, 95]],
+            Self::Italic => &[&[42], &[95]],
+            Self::Strike => &[&[126, 126]],
+            Self::Highlight => &[&[61, 61]],
+            Self::Code => &[&[96]],
+        }
+    }
+    pub fn width(self) -> usize { self.markers()[0].len() }
+}
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Span { pub a: usize, pub b: usize, pub style: Style }
 #[derive(Clone, PartialEq, Debug)]
@@ -79,6 +122,20 @@ fn scan(s: &[u16], from: usize, to: usize, sp: &mut Vec<Span>, ln: &mut Vec<Link
             }
             i += 1; continue;
         }
+        // ==highlight==
+        if c == b'=' as u16 && at(i + 1) == c && (i == from || s[i - 1] != c) && at(i + 2) != c {
+            if i + 2 < to && !space(s[i + 2]) {
+                if let Some(j) = (i + 3..to.saturating_sub(1)).find(|&j|
+                    s[j] == c && s[j + 1] == c && s[j - 1] != c && !space(s[j - 1]) && at(j + 2) != c
+                ) {
+                    push(sp, i, i + 2, Style::Mark);
+                    push(sp, i + 2, j, Style::Highlight);
+                    push(sp, j, j + 2, Style::Mark);
+                    scan(s, i + 2, j, sp, ln);
+                    i = j + 2; continue;
+                }
+            }
+        }
         // ~~strike~~
         if c == b'~' as u16 && at(i + 1) == c {
             if let Some(j) = (i + 3..to.saturating_sub(1)).find(|&j| s[j] == c && s[j + 1] == c) {
@@ -88,6 +145,22 @@ fn scan(s: &[u16], from: usize, to: usize, sp: &mut Vec<Span>, ln: &mut Vec<Link
             }
         }
         if c == b'*' as u16 || c == b'_' as u16 {
+            if at(i + 1) == c && at(i + 2) == c && at(i + 3) != c && !space(at(i + 3)) {
+                if let Some(j) = (i + 4..to.saturating_sub(2)).find(|&j| {
+                    s[j] == c && s[j + 1] == c && s[j + 2] == c
+                        && s[j - 1] != c && !space(s[j - 1]) && at(j + 3) != c
+                }) {
+                    push(sp, i, i + 2, Style::Mark);
+                    push(sp, i + 2, j + 1, Style::Bold);
+                    push(sp, i + 2, i + 3, Style::Mark);
+                    push(sp, i + 3, j, Style::Italic);
+                    scan(s, i + 3, j, sp, ln);
+                    push(sp, j, j + 1, Style::Mark);
+                    push(sp, j + 1, j + 3, Style::Mark);
+                    i = j + 3;
+                    continue;
+                }
+            }
             // **bold** / __bold__
             if at(i + 1) == c {
                 if i + 2 < to && s[i + 2] != SP {
@@ -144,20 +217,103 @@ fn scan(s: &[u16], from: usize, to: usize, sp: &mut Vec<Span>, ln: &mut Vec<Link
     }
 }
 
-/// plain text of a line, for the previews in the drawer
-pub fn strip(line: &str) -> String {
+pub(super) fn space(c: u16) -> bool { char::from_u32(c as u32).is_some_and(char::is_whitespace) }
+
+fn hidden_mark(line: &[u16], span: &Span) -> bool {
+    span.style == Style::Mark || (span.style == Style::Url && span.a >= 3
+        && starts(line, span.a - 2, "](") && line[span.a - 3] != b'[' as u16)
+}
+
+fn visible_offsets(line: &[u16], spans: &[Span]) -> (Vec<u16>, Vec<usize>) {
+    let mut shown = vec![true; line.len()];
+    for s in spans.iter().filter(|s| hidden_mark(line, s)) { shown[s.a..s.b].fill(false); }
+    let mut visible = Vec::new();
+    let mut offsets: Vec<_> = line.iter().zip(shown).map(|(&ch, shown)| {
+        let at = visible.len();
+        if shown { visible.push(ch); }
+        at
+    }).collect();
+    offsets.push(visible.len());
+    (visible, offsets)
+}
+
+/// The range and delimiters to insert, or the whole existing span to unwrap.
+pub fn format_edit(line: &[u16], selection: Range<usize>, format: Format, simple: bool) -> Option<(Range<usize>, Option<&'static [u16]>)> {
+    let (spans, _) = inline(line);
+    let (visible, offsets) = visible_offsets(line, &spans);
+    let (mut start, mut end) = (offsets[selection.start], offsets[selection.end]);
+    while start < end && space(visible[start]) { start += 1; }
+    while start < end && space(visible[end - 1]) { end -= 1; }
+    if start == end { return None; }
+    let style = format.style();
+    for s in &spans {
+        let (a, b) = (offsets[s.a], offsets[s.b]);
+        if start >= b || end <= a { continue; }
+        if s.style == style {
+            let width = format.width();
+            return (start >= a && end <= b).then_some((s.a - width..s.b + width, None));
+        }
+        if s.style == Style::Code && (start > a || end < b || (!simple && (selection.start >= s.a || selection.end <= s.b))) {
+            return None;
+        }
+    }
+
+    // At a hidden delimiter the same visible position has several raw offsets.
+    // Try inside existing styles first, then around them when the delimiters would collide.
+    let mut starts = vec![offsets.partition_point(|&pos| pos <= start) - 1];
+    let mut ends = vec![offsets.partition_point(|&pos| pos < end)];
+    for s in spans.iter().filter(|s| hidden_mark(line, s)) {
+        if offsets[s.a] == start { starts.push(s.a); }
+        if offsets[s.b] == end { ends.push(s.b); }
+    }
+    starts.sort_unstable_by(|a, b| b.cmp(a));
+    ends.sort_unstable();
+    starts.dedup();
+    ends.dedup();
+    let existing: Vec<_> = spans.iter().filter(|s| !hidden_mark(line, s))
+        .map(|s| (s.style, offsets[s.a], offsets[s.b])).collect();
+    for a in starts {
+        for &b in &ends {
+            for &marker in format.markers() {
+                let candidate = [&line[..a], marker, &line[a..b], marker, &line[b..]].concat();
+                let new_spans = inline(&candidate).0;
+                let (new_visible, new_offsets) = visible_offsets(&candidate, &new_spans);
+                if new_visible != visible { continue; }
+                let styles: HashSet<_> = new_spans.iter().map(|s| (s.style, new_offsets[s.a], new_offsets[s.b])).collect();
+                if styles.contains(&(style, start, end)) && existing.iter().all(|s| styles.contains(s)) {
+                    return Some((a..b, Some(marker)));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Text and highlight ranges in the same UTF-16 coordinates, with the markers removed.
+pub fn preview(line: &str) -> (Vec<u16>, Vec<Range<u32>>) {
     let w: Vec<u16> = line.encode_utf16().collect();
-    if image_path(&w).is_some() || line.trim_start().starts_with("```") { return String::new(); }
+    if image_path(&w).is_some() || line.trim_start().starts_with("```") { return (Vec::new(), Vec::new()); }
     let b = blocks(&[&w]).remove(0);
     let w = &w[mark_len(&w, &b)..];
     let (spans, _) = inline(w);
     let mut keep = vec![true; w.len()];
+    let mut highlights = Vec::new();
     for s in &spans {
         let link_url = s.style == Style::Url && s.a >= 2 && w[s.a - 1] == b'(' as u16 && w[s.a - 2] == b']' as u16;
         if s.style == Style::Mark || link_url { for k in s.a..s.b { keep[k] = false; } }
     }
-    let out: Vec<u16> = w.iter().zip(keep).filter(|(_, k)| *k).map(|(c, _)| *c).collect();
-    String::from_utf16_lossy(&out)
+    if spans.iter().any(|s| s.style == Style::Highlight) {
+        let mut offset = 0;
+        let mut positions: Vec<_> = keep.iter().map(|&k| { let start = offset; offset += u32::from(k); start }).collect();
+        positions.push(offset);
+        highlights.extend(spans.iter().filter(|s| s.style == Style::Highlight).map(|s| positions[s.a]..positions[s.b]));
+    }
+    let out = w.iter().zip(keep).filter(|(_, k)| *k).map(|(c, _)| *c).collect();
+    (out, highlights)
+}
+
+pub fn strip(line: &str) -> String {
+    String::from_utf16_lossy(&preview(line).0)
 }
 
 #[cfg(test)]
@@ -190,4 +346,64 @@ mod tests {
     }
     #[test]
     fn stripped() { assert_eq!(strip("## **Hi** [a](http://b)"), "Hi a"); }
+
+    #[test]
+    fn highlight_preserves_nested_styles_and_preview_offsets() {
+        let (text, ranges) = preview("📌 ==a **b**== `==code==`");
+        assert_eq!(String::from_utf16_lossy(&text), "📌 a b ==code==");
+        assert_eq!(ranges, vec![3..6]);
+        assert!(inline(&u("x == y && y == z")).0.is_empty());
+        assert!(inline(&u("===not a highlight===")).0.is_empty());
+    }
+
+    #[test]
+    fn highlight_selection_wraps_text_and_unwraps_existing_markers() {
+        let format = Format::Highlight;
+        assert_eq!(format_edit(&u(" hello "), 0..7, format, false), Some((1..6, Some(&[61, 61][..]))));
+        assert_eq!(format_edit(&u("==hello=="), 2..7, format, false), Some((0..9, None)));
+        assert_eq!(format_edit(&u("==hello=="), 0..9, format, false), Some((0..9, None)));
+        assert_eq!(format_edit(&u("`hello`"), 1..6, format, false), None);
+    }
+
+    #[test]
+    fn format_selection_supports_nested_emphasis() {
+        assert_eq!(format_edit(&u("**hello**"), 2..7, Format::Italic, true), Some((2..7, Some(&[42][..]))));
+        assert_eq!(format_edit(&u("*hello*"), 1..6, Format::Bold, true), Some((1..6, Some(&[42, 42][..]))));
+        assert_eq!(format_edit(&u("**_hello_**"), 3..8, Format::Bold, true), Some((0..11, None)));
+        assert_eq!(strip("==***hello***=="), "hello");
+    }
+
+    #[test]
+    fn format_selection_combines_and_removes_styles_independently() {
+        let apply = |text: &[u16], sel: Range<usize>, format: Format| {
+            let (range, marker) = format_edit(text, sel, format, true).expect("format command applies");
+            let replacement = match marker {
+                Some(m) => [m, &text[range.clone()], m].concat(),
+                None => text[range.start + format.width()..range.end - format.width()].to_vec(),
+            };
+            [&text[..range.start], &replacement, &text[range.end..]].concat()
+        };
+        let formats = [Format::Bold, Format::Italic, Format::Strike, Format::Highlight];
+        for first in formats {
+            for second in formats.into_iter().filter(|&f| f != first) {
+                let mut text = u("слово");
+                let mut active = vec![first, second];
+                active.extend(formats.into_iter().filter(|&f| f != first && f != second));
+                for &format in &active {
+                    text = apply(&text, 0..text.len(), format);
+                    assert_eq!(strip(&String::from_utf16_lossy(&text)), "слово");
+                }
+                for &format in active.iter().rev() {
+                    text = apply(&text, 0..text.len(), format);
+                    assert!(!inline(&text).0.iter().any(|s| s.style == format.style()));
+                    assert_eq!(strip(&String::from_utf16_lossy(&text)), "слово");
+                }
+                assert_eq!(text, u("слово"));
+            }
+        }
+        let text = u("*word*");
+        assert_eq!(strip(&String::from_utf16_lossy(&apply(&text, 0..5, Format::Highlight))), "word");
+        let text = u("==word==");
+        assert_eq!(strip(&String::from_utf16_lossy(&apply(&text, 0..text.len(), Format::Code))), "word");
+    }
 }
