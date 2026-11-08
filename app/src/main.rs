@@ -2530,7 +2530,13 @@ impl App {
     }
 
     unsafe fn finish_unfold(&mut self) {
-        if self.unfold_top.take().is_some() { self.resize_window(); }
+        if self.unfold_top.take().is_some() {
+            self.resize_window();
+            // Draw the moved window at once: until then it shows the old surface, offset by the move,
+            // and the editor shown right after would sit over that stale frame (a blink near an edge).
+            let _ = self.render();
+            let _ = ValidateRect(self.hwnd, None);
+        }
     }
 
     fn canvas_offset(&self) -> f32 {
