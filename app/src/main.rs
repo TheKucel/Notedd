@@ -7,6 +7,7 @@
 #![windows_subsystem = "windows"]
 
 mod checkbox;
+mod drop;
 mod edit_menu;
 mod icons;
 mod images;
@@ -181,7 +182,6 @@ static ICON: &[u8] = include_bytes!("../../assets/notedd.ico");
 
 // ---- RichEdit messages and structs ----
 const EM_REPLACESEL: u32 = 0x00C2;
-const EM_LINESCROLL: u32 = 0x00B6;
 const EM_SCROLLCARET: u32 = 0x00B7;
 const EM_EMPTYUNDOBUFFER: u32 = 0x00CD;
 const EM_POSFROMCHAR: u32 = 0x00D6;
@@ -193,6 +193,7 @@ const EM_GETPARAFORMAT: u32 = WM_USER + 61;
 const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
 const EM_SETCHARFORMAT: u32 = WM_USER + 68;
 const EM_SETEVENTMASK: u32 = WM_USER + 69;
+const EM_SETOLECALLBACK: u32 = WM_USER + 70;
 const EM_SETPARAFORMAT: u32 = WM_USER + 71;
 const EM_GETTEXTEX: u32 = WM_USER + 94;
 const EM_SETTYPOGRAPHYOPTIONS: u32 = WM_USER + 202;
@@ -242,6 +243,10 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_TEST: u32 = WM_APP + 2;
 const WM_HITS: u32 = WM_APP + 3;
 const WM_APPEAR: u32 = WM_APP + 4;
+/// files or pictures were dragged onto the note (see drop.rs)
+const WM_DROPPED: u32 = WM_APP + 5;
+/// corner radius of pictures in a note (DIP)
+const PIC_RADIUS: f32 = 8.0;
 const TIMER_ANIM: usize = 1;
 const TIMER_SAVE: usize = 2;
 const TIMER_CARET: usize = 3;
@@ -318,6 +323,8 @@ unsafe fn editor_paragraph(range: &ITextRange, pf: &ParaFormat2) -> Result<IText
     if numbering != 0 {
         para.SetListStart(pf.numbering_start as i32)?;
         para.SetListTab(points(pf.numbering_tab as i32))?;
+        // RichEdit right-aligns numbers by default, and wide ones ("2.", "10.") then stick out past the edge
+        para.SetListAlignment(windows::Win32::UI::Controls::RichEdit::tomAlignLeft.0)?;
     }
     Ok(para)
 }
@@ -865,8 +872,11 @@ impl App {
                 SendMessageW(self.edit, WM_VSCROLL, WPARAM(direction.0 as usize), LPARAM(0));
             }
         } else if lines != 0 {
-            let count = -(ticks as isize) * lines as isize;
-            SendMessageW(self.edit, EM_LINESCROLL, WPARAM(0), LPARAM(count));
+            // by pixels, not lines: a picture is drawn in one line's spacing, and line steps would jump over it whole
+            let step = (lh_body() * self.scale).round() as i32 * lines as i32;
+            let mut sp = self.edit_scroll();
+            sp.y = (sp.y - ticks * step).max(0);
+            self.set_edit_scroll(sp);
         }
         if self.finding { self.update_hits(); }
     }
@@ -1028,6 +1038,9 @@ impl App {
                     }
                 }
             }
+            // Simple mode hides a shown picture's link, and its line shrinks to a hairline above the picture
+            let hide_link = simple && pic_h > 0.0;
+            let (lh, g, size) = if hide_link { ((2.0 * s).round().max(1.0), (2.0 * s).round().max(1.0), 1.0) } else { (lh, g, size) };
             let mut pf: ParaFormat2 = std::mem::zeroed();
             pf.cb_size = std::mem::size_of::<ParaFormat2>() as u32;
             pf.mask = PFM_SPACEAFTER | PFM_SPACEBEFORE | PFM_LINESPACING | PFM_NUMBERING | PFM_STARTINDENT | PFM_OFFSET | PFM_NUMBERINGSTYLE | PFM_NUMBERINGTAB | PFM_NUMBERINGSTART;
@@ -1065,6 +1078,7 @@ impl App {
                 _ if head => fmt(a, b + 1, CFM_SIZE | CFM_COLOR | CFM_BOLD, CFE_BOLD, size, ink(), 0, ""),
                 Block::Code => fmt(a, b, CFM_FACE | CFM_SIZE | CFM_COLOR, 0, size, ink(), 0, "Consolas"),
                 Block::Fence => fmt(a, b, CFM_FACE | CFM_SIZE | CFM_COLOR, 0, size, ink3(), 0, "Consolas"),
+                Block::Image(_) if hide_link => fmt(a, b, CFM_SIZE | CFM_HIDDEN, CFE_HIDDEN, size, 0, 0, ""),
                 Block::Image(_) => fmt(a, b, CFM_SIZE | CFM_COLOR, 0, size, ink3(), 0, ""),
                 Block::Quote => fmt(a, b, CFM_ITALIC, CFE_ITALIC, size, 0, 0, ""),
                 _ => {}
@@ -1505,6 +1519,17 @@ impl App {
         std::fs::copy(src, &to).ok()?;
         Some(Self::pic_link(&to))
     }
+    /// a picture that exists only as bytes (dragged out of a browser): saved into the assets folder
+    fn import_bytes(&mut self, name: &str, bytes: &[u8]) -> Option<String> {
+        let name = std::path::Path::new(name);
+        if !images::is_image(name) { return None; }
+        let stem = name.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let ext = name.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+        let to = self.free_asset(&stem, &ext);
+        std::fs::write(&to, bytes).ok()?;
+        if self.imgs.size(&to).is_none() { let _ = std::fs::remove_file(&to); return None; }
+        Some(Self::pic_link(&to))
+    }
     unsafe fn drop_paths(&self, drop: HDROP) -> (Vec<String>, Vec<String>) {
         let (mut pics, mut other) = (Vec::new(), Vec::new());
         for i in 0..DragQueryFileW(drop, u32::MAX, None) {
@@ -1564,6 +1589,25 @@ impl App {
         let _ = DragQueryPoint(drop, &mut pt);
         let (pics, other) = self.drop_paths(drop);
         DragFinish(drop);
+        self.drop_at(pt, &pics, &other);
+    }
+    /// files or pictures dragged onto the note, handed over by RichEdit's OLE callback
+    unsafe fn dropped(&mut self) {
+        let Some(d) = drop::take() else { return };
+        let (mut pics, mut other) = (Vec::new(), Vec::new());
+        for item in d.items {
+            match item {
+                drop::Item::File(p) => match self.import_file(&p) { Some(l) => pics.push(l), None => other.push(p.display().to_string()) },
+                drop::Item::Data(name, bytes) => if let Some(l) = self.import_bytes(&name, &bytes) { pics.push(l) },
+            }
+        }
+        let mut pt = d.at;
+        let _ = ScreenToClient(self.edit, &mut pt);
+        self.drop_at(pt, &pics, &other);
+    }
+    /// pictures and file names put where they were dropped (`pt` in the editor's client coordinates)
+    unsafe fn drop_at(&mut self, pt: POINT, pics: &[String], other: &[String]) {
+        if pics.is_empty() && other.is_empty() { return; }
         let pl = POINTL { x: pt.x, y: pt.y };
         let cp = SendMessageW(self.edit, EM_CHARFROMPOS, WPARAM(0), LPARAM(&pl as *const _ as isize)).0 as i32;
         let _ = SetForegroundWindow(self.hwnd);
@@ -1580,8 +1624,14 @@ impl App {
         let paras = para_ranges(&text);
         let i = paras.iter().position(|&(a, b)| s0 >= a && s0 <= b).unwrap_or(0);
         let before = if i == 0 || s0 > paras[i].0 { "\r" } else { "" };
-        let w = wide(&format!("{before}{}\r", links.join("\r")));
+        // at the end of a line that has one below, that line follows the picture: no empty line in between
+        let s1 = s1.max(s0);
+        let k = paras.iter().position(|&(a, b)| s1 >= a && s1 <= b).unwrap_or(i);
+        let joined = s1 == paras[k].1 && k + 1 < paras.len();
+        let after = if joined { "" } else { "\r" };
+        let w = wide(&format!("{before}{}{after}", links.join("\r")));
         SendMessageW(self.edit, EM_REPLACESEL, WPARAM(1), LPARAM(w.as_ptr() as isize));
+        if joined { let (c, _) = self.get_sel(); self.select(c + 1, c + 1); }
         // the empty line after the pictures must not carry on a list it was split from
         let (c, _) = self.get_sel();
         if let Some(j) = self.para_at(c) {
@@ -1675,20 +1725,70 @@ impl App {
         if w.len() <= 6 { self.auto_list(); }
         kinds
     }
+    /// where paragraph `i`'s picture is drawn (editor client px): under its link line, narrowed to fit
+    unsafe fn picture_box(&self, i: usize, rc: RECT) -> Option<(i32, i32, i32, i32)> {
+        let p = self.pstyle.get(i)?;
+        let PK::Image(_, w, h) = &p.kind else { return None };
+        let s = self.scale;
+        let pos = |cp: i32| { let mut q = POINT::default(); SendMessageW(self.edit, EM_POSFROMCHAR, WPARAM(&mut q as *mut _ as usize), LPARAM(cp as isize)); q };
+        let (pa, pb) = (pos(p.a), pos(p.b));
+        let top = pb.y + (p.lh * s).round() as i32 + (3.0 * ts() * s).round() as i32;
+        let (mut pw, mut ph) = ((w * s).round() as i32, (h * s).round() as i32);
+        let room = rc.right - pa.x;
+        if pw > room && room > 0 { ph = ph * room / pw; pw = room; }
+        Some((pa.x, top, pw, ph))
+    }
+    /// In Simple mode a shown picture's link line is hidden and only a hairline tall, so the caret
+    /// never rests there: a caret that lands on it goes on to the line above or below, the way it was moving.
+    fn past_picture(&self, cp: i32) -> Option<i32> {
+        let i = self.para_at(cp).filter(|&i| i > 0 && matches!(self.pstyle[i].kind, PK::Image(..)))?;
+        let p = &self.pstyle[i];
+        let (was0, was1) = (self.seen.0, self.seen.1);
+        let up = if was0 >= p.a && was1 <= p.b { cp == p.a } else { was0 > p.b };
+        let last = p.b as usize >= self.styled_text.len();
+        Some(if (up || last) && p.a > 0 { p.a - 1 } else { p.b + 1 })
+    }
+    /// the paragraph whose picture is under a point of the editor
+    unsafe fn picture_at(&self, x: i32, y: i32) -> Option<usize> {
+        let mut rc = RECT::default();
+        let _ = GetClientRect(self.edit, &mut rc);
+        self.visible_paragraphs(rc).find(|&i| self.picture_box(i, rc).is_some_and(|(l, t, w, h)| x >= l && x < l + w && y >= t && y < t + h))
+    }
+    /// Backspace after a picture or Delete before it selects the picture; with the picture selected
+    /// either key removes its line. Joining text onto a picture's line would turn the picture back into text.
+    unsafe fn picture_key(&mut self, vk: u16) -> bool {
+        let back = vk == VK_BACK.0;
+        if (!back && vk != VK_DELETE.0) || GetKeyState(VK_CONTROL.0 as i32) < 0 { return false; }
+        let (s0, s1) = self.get_sel();
+        let Some(i) = self.para_at(s0) else { return false };
+        let is_pic = |j: usize| j > 0 && self.pstyle.get(j).is_some_and(|p| matches!(p.block, Block::Image(_)));
+        let p = &self.pstyle[i];
+        if s0 != s1 {
+            if !(is_pic(i) && s0 == p.a && s1 == p.b) { return false; }
+            let len = self.styled_text.len() as i32;
+            let (a, b) = if p.b < len { (p.a, p.b + 1) } else { (p.a - 1, p.b) };
+            self.select(a, b);
+            let empty = [0u16];
+            SendMessageW(self.edit, EM_REPLACESEL, WPARAM(1), LPARAM(empty.as_ptr() as isize));
+            return true;
+        }
+        // the key would erase into a picture's line: from the line after it (empty or not), from the
+        // line before it, or from the edge of the picture's own line
+        let (toward, away) = if back { (p.a, p.b) } else { (p.b, p.a) };
+        let neighbour = if back { i.wrapping_sub(1) } else { i + 1 };
+        let candidates: &[usize] = if s0 == toward { &[neighbour, i] } else if s0 == away { &[i] } else { &[] };
+        let Some(j) = candidates.iter().copied().find(|&j| is_pic(j)) else { return false };
+        let (a, b) = (self.pstyle[j].a, self.pstyle[j].b);
+        self.select(a, b);
+        let _ = InvalidateRect(self.edit, None, false);
+        true
+    }
     /// what a press at a point of the note hits: a task box (its position) or, with Ctrl, a link or picture
     unsafe fn edit_target(&self, x: i32, y: i32, ctrl: bool) -> Option<std::result::Result<i32, String>> {
         let s = self.scale;
         let pos = |cp: i32| { let mut p = POINT::default(); SendMessageW(self.edit, EM_POSFROMCHAR, WPARAM(&mut p as *mut _ as usize), LPARAM(cp as isize)); p };
         if ctrl {
-            let mut rc = RECT::default();
-            let _ = GetClientRect(self.edit, &mut rc);
-            for p in &self.pstyle[self.visible_paragraphs(rc)] {
-                if let PK::Image(path, w, h) = &p.kind {
-                    let (pa, pb) = (pos(p.a), pos(p.b));
-                    let top = pb.y + (p.lh * s).round() as i32 + (3.0 * ts() * s) as i32;
-                    if x >= pa.x && x < pa.x + (w * s) as i32 && y >= top && y < top + (h * s) as i32 { return Some(Err(path.to_string_lossy().to_string())); }
-                }
-            }
+            if let Some(PK::Image(path, ..)) = self.picture_at(x, y).map(|i| &self.pstyle[i].kind) { return Some(Err(path.to_string_lossy().to_string())); }
         }
         let pl = POINTL { x, y };
         let cp = SendMessageW(self.edit, EM_CHARFROMPOS, WPARAM(0), LPARAM(&pl as *const _ as isize)).0 as i32;
@@ -1717,10 +1817,21 @@ impl App {
     /// a press in the note: ticks a task box, Ctrl opens a link or a picture. true when handled here
     unsafe fn edit_click(&mut self, lp: LPARAM) -> bool {
         let (x, y) = ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32);
-        match self.edit_target(x, y, GetKeyState(VK_CONTROL.0 as i32) < 0) {
+        let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+        match self.edit_target(x, y, ctrl) {
             Some(Ok(at)) => { let _ = SetFocus(self.edit); self.toggle_task(at); true }
             Some(Err(url)) => { self.open_link(&url); true }
-            None => false,
+            None => match self.picture_at(x, y).filter(|_| !ctrl) {
+                // a click on a picture selects it, so Delete or Backspace removes it
+                Some(i) => {
+                    let _ = SetFocus(self.edit);
+                    let (a, b) = (self.pstyle[i].a, self.pstyle[i].b);
+                    self.select(a, b);
+                    let _ = InvalidateRect(self.edit, None, false);
+                    true
+                }
+                None => false,
+            },
         }
     }
     unsafe fn edit_hand(&self) -> bool {
@@ -1834,15 +1945,24 @@ impl App {
                 k = j;
             }
         }
-        let pics: Vec<(i32, i32, f32, PathBuf, f32, f32)> = self.pstyle[visible.clone()].iter().filter_map(|p| match &p.kind {
-            PK::Image(f, w, h) => Some((p.a, p.b, p.lh, f.clone(), *w, *h)), _ => None }).collect();
-        for (a, b, lh, f, w, h) in pics {
-            let (pa, pb) = (pos(a), pos(b));
-            let top = pb.y + (lh * s).round() as i32 + d(3.0);
-            let (mut pw, mut ph) = ((w * s).round() as i32, (h * s).round() as i32);
-            let room = rc.right - pa.x;
-            if pw > room && room > 0 { ph = ph * room / pw; pw = room; }
-            if top < rc.bottom && top + ph > 0 { self.imgs.draw(dc, &f, pa.x, top, pw, ph); }
+        let (s0, s1) = self.get_sel();
+        for i in visible.clone() {
+            let Some((x, y, w, h)) = self.picture_box(i, rc) else { continue };
+            if y >= rc.bottom || y + h <= 0 { continue; }
+            let p = &self.pstyle[i];
+            // a selected picture (its whole line) shows faded, the way a selection covers text
+            let selected = s0 < s1 && s0 <= p.a && s1 >= p.b;
+            let PK::Image(f, ..) = &p.kind else { continue };
+            let f = f.clone();
+            if selected {
+                // RichEdit's selection covers the whole line box, picture gap included: only the link line keeps it
+                let (link, below) = (pos(p.b), if (p.b as usize) < self.styled_text.len() { pos(p.b + 1).y } else { rc.bottom });
+                let gap = RECT { left: x.min(link.x), top: link.y + (p.lh * s).round() as i32, right: (x + w).max(link.x + d(4.0)), bottom: below };
+                let paper = CreateSolidBrush(COLORREF(bgr(self.shown_color(&self.cur))));
+                FillRect(dc, &gap, paper);
+                let _ = DeleteObject(paper);
+            }
+            self.imgs.draw(dc, &f, x, y, w, h, (PIC_RADIUS * s).round() as i32, if selected { 120 } else { 255 });
         }
         self.draw_tasks(dc, rc, visible);
     }
@@ -1964,6 +2084,14 @@ impl App {
     unsafe fn sync_edit(&mut self) {
         let focus = self.edit_visible && !self.hiding && GetFocus() == self.edit;
         let (s0, s1) = self.get_sel();
+        if focus && s0 == s1 && self.prefs.simple_editor {
+            if let Some(to) = self.past_picture(s0) {
+                self.seen.0 = s0;
+                self.seen.1 = s1;
+                self.select(to, to);
+                return self.sync_edit();
+            }
+        }
         let mut cp = POINT::default();
         let mut sp = POINT::default();
         if focus {
@@ -3885,6 +4013,10 @@ impl App {
     }
     unsafe fn toggle_pin(&mut self) {
         self.pinned = !self.pinned;
+        // remembered: the next start opens pinned or not, as it was left
+        let mut p = self.prefs;
+        p.pinned = self.pinned;
+        self.apply_prefs(p);
         let _ = SetWindowPos(self.hwnd, if self.pinned { HWND_TOPMOST } else { HWND_NOTOPMOST }, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         self.invalidate();
     }
@@ -4522,6 +4654,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_NOTIFY => { if a.finding { let _ = PostMessageW(hwnd, WM_HITS, WPARAM(0), LPARAM(0)); } LRESULT(0) }
             WM_HITS => { a.update_hits(); LRESULT(0) }
             WM_APPEAR => { a.appear(); LRESULT(0) }
+            WM_DROPPED => { a.dropped(); LRESULT(0) }
             WM_TIMER => {
                 match wp.0 {
                     // only when the loop is stuck in a modal one (window drag, menu)
@@ -4727,7 +4860,7 @@ fn main() -> Result<()> {
         let (pw, ph) = ((ww() * scale) as i32, ((eh() + PADB) * scale) as i32);
         let x = (GetSystemMetrics(SM_CXSCREEN) - pw) / 2;
         let y = (GetSystemMetrics(SM_CYSCREEN) - ph) / 3;
-        let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, class, w!("Notedd"), WS_POPUP | WS_CLIPCHILDREN, x, y, pw, ph, None, None, instance, None)?;
+        let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | if prefs.pinned { WS_EX_TOPMOST } else { WINDOW_EX_STYLE(0) }, class, w!("Notedd"), WS_POPUP | WS_CLIPCHILDREN, x, y, pw, ph, None, None, instance, None)?;
         let pref = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as _, 4);
 
@@ -4749,6 +4882,11 @@ fn main() -> Result<()> {
             0, 0, 1, 1, hwnd, None, instance, None)?;
         OLD_EDIT = SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as *const () as isize);
         DragAcceptFiles(edit, true);
+        // real drags go to RichEdit's own OLE drop target; its callback passes files and pictures to us.
+        // RichEdit keeps a reference; ours lives as long as the app.
+        let ole_callback = drop::Callback::new(hwnd, WM_DROPPED);
+        SendMessageW(edit, EM_SETOLECALLBACK, WPARAM(0), LPARAM(ole_callback.as_raw() as isize));
+        std::mem::forget(ole_callback);
         let pop = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, w!("NoteddPalette"), PCWSTR::null(), WS_POPUP,
             0, 0, 1, 1, hwnd, None, instance, None)?;
 
@@ -4777,7 +4915,7 @@ fn main() -> Result<()> {
             plus_sc: Ease::at(1.0), pal_t: Ease::at(0.0), sw_sc: [Ease::at(1.0); MAX_CARDS],
             hover_ctl: None, hover_plus: false, hover_tab: false, hover_fbtn: None, press_tab: None, press_folder: None, press_size: None, drag0: None, press_plus: false, tracking: false,
             palette: None, pal_anchor: (0.0, 0.0), pal_hover: None, pal_delete_pressed: false, pal_tracking: false,
-            pinned: true, docks: 0, rl: Ease::at(R), rr: Ease::at(R), win_x: 0.0, win_x_to: 0.0, x_glide: false, prefs, coll: coll.clone(), settings: false, set_page: 0, set_scroll: 0.0, set_scroll_drag: None, capturing: None, hk_err: None, pick: None, pick_hsv: [0.0; 3], pick_hex: vec![], press_pick: None,
+            pinned: prefs.pinned, docks: 0, rl: Ease::at(R), rr: Ease::at(R), win_x: 0.0, win_x_to: 0.0, x_glide: false, prefs, coll: coll.clone(), settings: false, set_page: 0, set_scroll: 0.0, set_scroll_drag: None, capturing: None, hk_err: None, pick: None, pick_hsv: [0.0; 3], pick_hex: vec![], press_pick: None,
             ctl_open: false, ctl_a: Ease::at(1.0), cap_n: Ease::at(4.0), more_t: Ease::at(0.0), ctl_last: vec![], ctl_prev: vec![], ctl_fade: Ease::at(1.0),
             animating: false, last_frame: Instant::now(), fps: std::env::var("PANE_FPS").ok().map(|_| (0, 0.0, 0.0, 0.0)), previews: Default::default(), seg_anim: HashMap::new(), focus: (0, 0), kb_focus: false, last_cursor: (i32::MIN, 0), mouse_moved: false,
             autostart: false, hover_set: None, demo: false, slide: (Ease::at(0.0), Ease::at(0.0)), slide_base: POINT::default(), edit_visible: false, edit_snapshot: None, suspended_scroll: None, hiding: false, guard: false, caret_on: true, tick: Instant::now(), tray,
@@ -4823,7 +4961,7 @@ fn main() -> Result<()> {
                     }
                     if msg.message == WM_KEYDOWN && msg.hwnd == a.edit {
                         // RichEdit erases on keydown. Repair the range before it processes Backspace.
-                        if a.list_key(vk) || (vk == VK_BACK.0 && a.simple_edit_key(msg.message, msg.wParam, msg.lParam).is_some()) {
+                        if a.list_key(vk) || a.picture_key(vk) || (vk == VK_BACK.0 && a.simple_edit_key(msg.message, msg.wParam, msg.lParam).is_some()) {
                             a.sync_edit();
                             continue;
                         }

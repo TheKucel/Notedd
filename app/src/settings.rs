@@ -38,6 +38,8 @@ pub struct Prefs {
     pub cards: [[u32; MAX_CARDS]; 3],
     /// how many card colours the palette offers
     pub ncards: usize,
+    /// the window stays above other windows
+    pub pinned: bool,
     /// text and accent overrides per theme kind (None = the theme's own)
     pub ink: [Option<u32>; 3],
     pub accent: [Option<u32>; 3],
@@ -45,7 +47,7 @@ pub struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Prefs {
-        Prefs { language: None, simple_editor: false, theme: 0, scale: 100, dir: 0, far: false, speed: 1, keys: DEFAULT_KEYS, cards: DEFAULT_CARDS, ncards: 6, ink: [None; 3], accent: [None; 3] }
+        Prefs { language: None, simple_editor: false, theme: 0, scale: 100, dir: 0, far: false, speed: 1, keys: DEFAULT_KEYS, cards: DEFAULT_CARDS, ncards: 6, pinned: false, ink: [None; 3], accent: [None; 3] }
     }
 }
 
@@ -103,6 +105,7 @@ pub fn load() -> Prefs {
             "speed" => p.speed = (n as u8).min(2),
             "hk_mods" => p.keys[0].0 = n,
             "hk_vk" => if n != 0 { p.keys[0].1 = n },
+            "pinned" => p.pinned = n != 0,
             "ncards" => p.ncards = n.clamp(1, MAX_CARDS as u32) as usize,
             _ => {
                 if let Some(i) = idx("key", KEYS) {
@@ -124,7 +127,7 @@ pub fn save(p: &Prefs) {
     let editor = if p.simple_editor { "simple" } else { "markdown" };
     let mut s = format!("language={language}\neditor={editor}\ntheme={}\nscale={}\ndir={}\nfar={}\nspeed={}\n", p.theme, p.scale, p.dir, p.far as u8, p.speed);
     for (i, (m, vk)) in p.keys.iter().enumerate() { s += &format!("key{i}={m},{vk}\n"); }
-    s += &format!("ncards={}\n", p.ncards);
+    s += &format!("ncards={}\npinned={}\n", p.ncards, p.pinned as u8);
     let h = |c: Option<u32>| c.map(|c| format!("{c:06x}")).unwrap_or_default();
     for t in 0..3 {
         s += &format!("cards{t}={}\n", p.cards[t].iter().map(|c| format!("{c:06x}")).collect::<Vec<_>>().join(","));
