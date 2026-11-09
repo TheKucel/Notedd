@@ -30,7 +30,27 @@ pub enum Item {
 /// what was dropped and where (screen coordinates)
 pub struct Dropped { pub items: Vec<Item>, pub at: POINT }
 
-thread_local! { static PENDING: RefCell<Option<Dropped>> = const { RefCell::new(None) }; }
+thread_local! {
+    static PENDING: RefCell<Option<Dropped>> = const { RefCell::new(None) };
+    /// when and what the last drop was: RichEdit can ask for the same drop more than once
+    static LAST: RefCell<Option<(u64, Vec<String>)>> = const { RefCell::new(None) };
+}
+
+fn signature(items: &[Item]) -> Vec<String> {
+    items.iter().map(|i| match i { Item::File(p) => p.display().to_string(), Item::Data(n, b) => format!("{n}:{}", b.len()) }).collect()
+}
+
+/// true if this drop repeats the previous one within a moment
+fn repeated(items: &[Item]) -> bool {
+    let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    let sig = signature(items);
+    LAST.with(|l| {
+        let mut l = l.borrow_mut();
+        let again = l.as_ref().is_some_and(|(t, s)| now.saturating_sub(*t) < 1500 && *s == sig);
+        *l = Some((now, sig));
+        again
+    })
+}
 
 /// the drop the callback posted, once
 pub fn take() -> Option<Dropped> { PENDING.with(|p| p.borrow_mut().take()) }
@@ -128,7 +148,7 @@ impl IRichEditOleCallback_Impl for Callback_Impl {
                 // while dragging: say yes, so the cursor shows a drop is possible
                 if !really.as_bool() { return Ok(()); }
                 let items = unsafe { if real_files { files(o) } else { virtual_files(o) } };
-                if !items.is_empty() {
+                if !items.is_empty() && !repeated(&items) {
                     let mut at = POINT::default();
                     unsafe { let _ = GetCursorPos(&mut at); }
                     PENDING.with(|p| *p.borrow_mut() = Some(Dropped { items, at }));
@@ -161,5 +181,156 @@ impl IRichEditOleCallback_Impl for Callback_Impl {
     fn GetContextMenu(&self, _t: RICH_EDIT_GET_CONTEXT_MENU_SEL_TYPE, _o: Option<&IOleObject>, _r: *mut CHARRANGE, menu: *mut HMENU) -> Result<()> {
         if !menu.is_null() { unsafe { *menu = HMENU::default(); } }
         Err(E_NOTIMPL.into())
+    }
+}
+
+/// Drops a fake Explorer drag (CF_HDROP) on a real RichEdit through the drop target RichEdit registered
+/// itself, then counts what reaches the app: one drop must be one message and one set of files.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::LibraryLoader::LoadLibraryW;
+
+    const MSG: u32 = WM_APP + 5;
+
+    #[implement(IDataObject)]
+    struct Files { paths: Vec<PathBuf> }
+
+    impl IDataObject_Impl for Files_Impl {
+        fn GetData(&self, f: *const FORMATETC) -> Result<STGMEDIUM> {
+            let f = unsafe { &*f };
+            if f.cfFormat == CF_TEXT_W {
+                let mut w: Vec<u16> = self.paths[0].as_os_str().to_string_lossy().encode_utf16().collect();
+                w.push(0);
+                unsafe {
+                    let g = GlobalAlloc(GMEM_MOVEABLE, w.len() * 2)?;
+                    std::ptr::copy_nonoverlapping(w.as_ptr(), GlobalLock(g) as *mut u16, w.len());
+                    let _ = GlobalUnlock(g);
+                    return Ok(STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: g }, pUnkForRelease: std::mem::ManuallyDrop::new(None) });
+                }
+            }
+            if f.cfFormat != CF_FILES { return Err(DV_E_FORMATETC.into()); }
+            let mut wide: Vec<u16> = Vec::new();
+            for p in &self.paths { wide.extend(p.as_os_str().to_string_lossy().encode_utf16()); wide.push(0); }
+            wide.push(0);
+            let head = std::mem::size_of::<DROPFILES>();
+            unsafe {
+                let g = GlobalAlloc(GMEM_MOVEABLE, head + wide.len() * 2)?;
+                let p = GlobalLock(g) as *mut u8;
+                std::ptr::write_unaligned(p as *mut DROPFILES, DROPFILES { pFiles: head as u32, pt: POINT::default(), fNC: BOOL(0), fWide: BOOL(1) });
+                std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, p.add(head), wide.len() * 2);
+                let _ = GlobalUnlock(g);
+                Ok(STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: g }, pUnkForRelease: std::mem::ManuallyDrop::new(None) })
+            }
+        }
+        fn GetDataHere(&self, _f: *const FORMATETC, _m: *mut STGMEDIUM) -> Result<()> { Err(E_NOTIMPL.into()) }
+        fn QueryGetData(&self, f: *const FORMATETC) -> HRESULT {
+            let f = unsafe { &*f };
+            if (f.cfFormat == CF_FILES || f.cfFormat == CF_TEXT_W) && f.tymed & TYMED_HGLOBAL.0 as u32 != 0 { S_OK } else { DV_E_FORMATETC }
+        }
+        fn GetCanonicalFormatEtc(&self, _i: *const FORMATETC, _o: *mut FORMATETC) -> HRESULT { E_NOTIMPL }
+        fn SetData(&self, _f: *const FORMATETC, _m: *const STGMEDIUM, _r: BOOL) -> Result<()> { Err(E_NOTIMPL.into()) }
+        fn EnumFormatEtc(&self, d: u32) -> Result<IEnumFORMATETC> {
+            if d != DATADIR_GET.0 as u32 { return Err(E_NOTIMPL.into()); }
+            unsafe { SHCreateStdEnumFmtEtc(&[format(CF_FILES, TYMED_HGLOBAL, -1), format(CF_TEXT_W, TYMED_HGLOBAL, -1)]) }
+        }
+        fn DAdvise(&self, _f: *const FORMATETC, _a: u32, _s: Option<&IAdviseSink>) -> Result<u32> { Err(OLE_E_ADVISENOTSUPPORTED.into()) }
+        fn DUnadvise(&self, _c: u32) -> Result<()> { Err(OLE_E_ADVISENOTSUPPORTED.into()) }
+        fn EnumDAdvise(&self) -> Result<IEnumSTATDATA> { Err(OLE_E_ADVISENOTSUPPORTED.into()) }
+    }
+
+    /// parent + RichEdit with our callback, and the OLE drop target RichEdit registered on itself
+    unsafe fn rig() -> (HWND, IDropTarget) {
+        OleInitialize(None).unwrap();
+        LoadLibraryW(w!("Msftedit.dll")).unwrap();
+        let parent = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), PCWSTR::null(), WS_POPUP | WS_VISIBLE, 0, 0, 400, 300, None, None, None, None).unwrap();
+        let edit = CreateWindowExW(WINDOW_EX_STYLE(0), w!("RICHEDIT50W"), PCWSTR::null(),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL) as u32), 0, 0, 400, 300, parent, None, None, None).unwrap();
+        EDIT.with(|e| e.set(edit));
+        let cb = Callback::new(parent, MSG);
+        SendMessageW(edit, EM_SETOLECALLBACK, WPARAM(0), LPARAM(cb.as_raw() as isize));
+        std::mem::forget(cb);
+        let raw = GetPropW(edit, w!("OleDropTargetInterface"));
+        assert!(!raw.is_invalid(), "RichEdit registered no OLE drop target");
+        let target = IDropTarget::from_raw_borrowed(&raw.0).unwrap().clone();
+        (parent, target)
+    }
+
+    /// messages posted to `parent` so far
+    unsafe fn posted(parent: HWND) -> usize {
+        let mut m = WinMsg::default();
+        let mut n = 0;
+        while PeekMessageW(&mut m, parent, MSG, MSG, PM_REMOVE).as_bool() { n += 1; }
+        n
+    }
+    type WinMsg = windows::Win32::UI::WindowsAndMessaging::MSG;
+
+    fn picture() -> PathBuf {
+        let p = std::env::temp_dir().join(format!("notedd-drop-test-{}.png", std::process::id()));
+        std::fs::write(&p, b"\x89PNG\r\n\x1a\n").unwrap();
+        p
+    }
+
+    thread_local! { static EDIT: std::cell::Cell<HWND> = std::cell::Cell::new(HWND::default()); }
+    fn find_edit() -> HWND { EDIT.with(|e| e.get()) }
+
+    unsafe fn drop_once(target: &IDropTarget, data: &IDataObject) {
+        let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
+        let mut r = RECT::default();
+        let _ = GetWindowRect(find_edit(), &mut r);
+        let pt = POINTL { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+        target.DragEnter(data, MODIFIERKEYS_FLAGS(1), pt, &mut effect).unwrap();
+        assert_ne!(effect.0, 0, "RichEdit must accept the drag");
+        target.DragOver(MODIFIERKEYS_FLAGS(1), pt, &mut effect).unwrap();
+        let _ = target.Drop(data, MODIFIERKEYS_FLAGS(1), pt, &mut effect);
+    }
+
+    #[test]
+    fn one_drop_is_one_message_and_one_set_of_files() {
+        unsafe {
+            let (parent, target) = rig();
+            let path = picture();
+            let data: IDataObject = Files { paths: vec![path.clone()] }.into();
+            super::PENDING.with(|p| *p.borrow_mut() = None);
+            drop_once(&target, &data);
+            assert_eq!(posted(parent), 1, "one drop must post exactly one message");
+            let got = take().expect("the drop reaches the app");
+            assert_eq!(got.items.len(), 1, "one file dropped, one item handed over");
+            assert!(take().is_none(), "nothing is left over after the first take");
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn two_files_stay_two_items() {
+        unsafe {
+            let (parent, target) = rig();
+            let (a, b) = (picture(), picture().with_extension("2.png"));
+            std::fs::write(&b, b"\x89PNG\r\n\x1a\n").unwrap();
+            let data: IDataObject = Files { paths: vec![a.clone(), b.clone()] }.into();
+            super::LAST.with(|l| *l.borrow_mut() = None);
+            drop_once(&target, &data);
+            assert_eq!(posted(parent), 1);
+            assert_eq!(take().unwrap().items.len(), 2);
+            let _ = std::fs::remove_file(a);
+            let _ = std::fs::remove_file(b);
+        }
+    }
+
+    #[test]
+    fn a_repeated_accept_of_the_same_drop_is_ignored() {
+        unsafe {
+            let (parent, _target) = rig();
+            let path = picture();
+            let data: IDataObject = Files { paths: vec![path.clone()] }.into();
+            super::LAST.with(|l| *l.borrow_mut() = None);
+            let cb: IRichEditOleCallback = Callback::new(parent, MSG);
+            let mut cf = 0u16;
+            for _ in 0..3 {
+                let _ = cb.QueryAcceptData(&data, &mut cf, RECO_DROP, BOOL(1), HGLOBAL::default());
+            }
+            assert_eq!(posted(parent), 1, "three accepts of one drop post one message");
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
