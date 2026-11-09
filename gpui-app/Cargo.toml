@@ -1,0 +1,46 @@
+[package]
+name = "notedd-gpui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+notedd-editor = { path = "../editor" }
+notedd-core = { path = "../core" }
+gpui = "0.2.2"
+unicode-segmentation = "1.13"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+smallvec = "1"
+async-channel = "2"
+raw-window-handle = "0.6"
+# tray icon, global shortcuts, Recycle Bin / Trash, user folders: the same code on every system
+tray-icon = "0.26.1"
+global-hotkey = "0.10.0"
+trash = "5.3.0"
+dirs = "6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-registry = "0.5"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# tray-icon on Linux runs on GTK (AppIndicator)
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.61"
+features = [
+    "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Security", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_LibraryLoader",
+    "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging",
+]
+
+# GPUI 0.2.2 with local patches (Windows IME fixes among them); see vendor/PATCHES.md.
+# vendor/ comes from Quiet.md (MIT); GPUI itself is Apache-2.0 (vendor/gpui/LICENSE-APACHE).
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
+taffy = { path = "vendor/taffy" }
+
+[profile.release]
+opt-level = 3

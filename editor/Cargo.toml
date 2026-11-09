@@ -1,0 +1,12 @@
+[package]
+name = "notedd-editor"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+notedd-core = { path = "../core" }
+unicode-segmentation = "1.13"
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,61 @@
+name: gpui
+
+on:
+  push:
+    branches: [main, gpui-port]
+    paths: &paths
+      - gpui-app/**
+      - editor/**
+      - core/**
+      - locale.rs
+      - app/src/strings.rs
+      - assets/**
+      - .github/workflows/gpui.yml
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev libfontconfig-dev libfreetype-dev \
+            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            gpui-app
+            editor
+
+      - name: Test editor
+        run: cargo test --locked --manifest-path editor/Cargo.toml
+
+      - name: Build app
+        working-directory: gpui-app
+        run: cargo build --release --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notedd-gpui-${{ runner.os }}
+          path: |
+            gpui-app/target/release/notedd-gpui
+            gpui-app/target/release/notedd-gpui.exe
+          if-no-files-found: error
