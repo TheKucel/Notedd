@@ -66,10 +66,9 @@ jobs:
           path: macos/target/notedd-setup-macos.zip
           if-no-files-found: error
 
-  # vX.Y.Z publishes the Windows installer, vX.Y.Z-macos publishes the macOS one
-  release-windows:
-    if: startsWith(github.ref, 'refs/tags/v') && !endsWith(github.ref, '-macos')
-    needs: [build]
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -78,20 +77,6 @@ jobs:
         with:
           name: notedd-setup
 
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: notedd-setup.exe
-
-  release-macos:
-    if: startsWith(github.ref, 'refs/tags/v') && endsWith(github.ref, '-macos')
-    needs: [build-macos]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
       - uses: actions/download-artifact@v5
         with:
           name: notedd-setup-macos
@@ -101,4 +86,6 @@ jobs:
         with:
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: notedd-setup-macos.zip
+          files: |
+            notedd-setup.exe
+            notedd-setup-macos.zip
