@@ -191,6 +191,7 @@ const EM_EXSETSEL: u32 = WM_USER + 55;
 const EM_GETOLEINTERFACE: u32 = WM_USER + 60;
 const EM_GETPARAFORMAT: u32 = WM_USER + 61;
 const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
+const EM_HIDESELECTION: u32 = WM_USER + 63;
 const EM_SETCHARFORMAT: u32 = WM_USER + 68;
 const EM_SETEVENTMASK: u32 = WM_USER + 69;
 const EM_SETOLECALLBACK: u32 = WM_USER + 70;
@@ -607,6 +608,9 @@ struct App {
     car_a: u8,
     /// last seen RichEdit state: selection, caret position, scroll, focus
     seen: (i32, i32, i32, i32, i32, bool),
+    /// the selection we draw (empty when none), and whether RichEdit's own painting of it is hidden
+    sel_drawn: (i32, i32),
+    sel_hidden: Option<bool>,
     wheel_delta: i32,
     /// The open note as styled: paragraphs, links (from, to, target) and inline code.
     pstyle: Vec<PStyle>,
@@ -821,6 +825,14 @@ impl App {
             Some(p) => ((p.lh - p.g) / 2.0, (p.lh + p.g) / 2.0, 0.0),
             None => if cp <= self.title_end { hl_title() } else { hl_body() },
         }
+    }
+    /// where the glyphs really sit in the line box at a position: (top, bottom) from the line top.
+    /// RichEdit puts an exact line box's extra height above the glyphs, not around them
+    /// (measured: baseline about 3 DIP over the box bottom, descenders reaching 1 DIP past it).
+    fn ink_at(&self, cp: i32) -> (f32, f32) {
+        let hl = self.hl_at(cp);
+        let (lh, g) = (hl.0 + hl.1, hl.1 - hl.0);
+        (lh + 1.0 - g, lh + 1.0)
     }
     /// a picture's file: relative to the notes folder, or an absolute path; web pictures are not fetched
     fn image_file(&self, path: &str) -> Option<PathBuf> {
@@ -1907,6 +1919,34 @@ impl App {
                 k = j;
             }
         }
+        // the selection: one glyph-high band per visual line, a short nub for a selected paragraph end
+        let (a, b) = self.sel_drawn;
+        let (a, b) = (a.max(first), b.min(last + 1));
+        let mut k = a;
+        while k < b {
+            let p = pos(k);
+            let mut j = b;
+            if pos(b - 1).y != p.y {
+                let mut lo = k + 1;
+                while lo < j {
+                    let mid = lo + (j - lo) / 2;
+                    if pos(mid).y == p.y { lo = mid + 1; } else { j = mid; }
+                }
+            }
+            let pe = pos(j);
+            let x1 = if pe.y == p.y && pe.x > p.x { pe.x } else {
+                let c = self.styled_text.get((j - 1) as usize).copied().unwrap_or(13);
+                let px = pos(j - 1).x;
+                if c == 13 || c == 10 { px + d(5.0) }
+                else {
+                    let f = if j - 1 < self.title_end { &self.fonts.head } else { &self.fonts.body };
+                    px + (self.text_w(&[c], f) * s).round() as i32
+                }
+            };
+            let (top, bottom) = self.ink_at(k);
+            tint(p.x, p.y + (top * s).round() as i32, x1.max(p.x + d(2.0)), p.y + (bottom * s).round() as i32, if night() { 0.24 } else { 0.15 });
+            k = j;
+        }
         let (s0, s1) = self.get_sel();
         for i in visible.clone() {
             let Some((x, y, w, h)) = self.picture_box(i, rc) else { continue };
@@ -2054,6 +2094,7 @@ impl App {
                 return self.sync_edit();
             }
         }
+        self.sync_sel();
         let mut cp = POINT::default();
         let mut sp = POINT::default();
         if focus {
@@ -2065,11 +2106,12 @@ impl App {
         if key == self.seen { return; }
         self.seen = key;
         if !focus || s0 != s1 { self.caret_off(); return; }
-        let hl = self.hl_at(s0);
         let s = self.scale;
         let tx = cp.x as f32;
-        let th = (hl.1 - hl.0 - 1.0) * s;
-        let mut ty = cp.y as f32 + (hl.0 + 0.5) * s;
+        // from just above the ascenders down to the descenders
+        let (top, bottom) = self.ink_at(s0);
+        let th = ((bottom - top) * 0.9 * s).round();
+        let mut ty = cp.y as f32 + bottom * s - th;
         if self.para_at(s0).is_some_and(|i| matches!(self.pstyle[i].block, Block::Heading(_))) {
             if let Some(selection) = self.doc.as_ref().and_then(|d| d.GetSelection().ok()) {
                 // The text baseline includes paragraph spacing. Keep the native caret's
@@ -2092,6 +2134,45 @@ impl App {
         c.last = Some(Instant::now());
         self.tick_caret(0.0);
     }
+    /// RichEdit keeps owning the selection; we only paint it, at glyph height (RichEdit's covers
+    /// the whole line box, paragraph gap included). Its own painting is hidden only while a range
+    /// is selected, so an empty selection's caret stays exactly as RichEdit places it.
+    /// Also called before every editor paint, so RichEdit's selection never shows next to ours.
+    unsafe fn sync_sel(&mut self) {
+        let focus = self.edit_visible && !self.hiding && GetFocus() == self.edit;
+        if !focus {
+            // RichEdit hides its selection without focus; its state is set again on return
+            self.sel_hidden = None;
+            return self.set_sel_drawn((0, 0));
+        }
+        let (s0, s1) = self.get_sel();
+        let hide = s0 != s1;
+        if self.sel_hidden != Some(hide) {
+            self.sel_hidden = Some(hide);
+            SendMessageW(self.edit, EM_HIDESELECTION, WPARAM(hide as usize), LPARAM(0));
+        }
+        self.set_sel_drawn(if hide { (s0, s1) } else { (0, 0) });
+    }
+    /// repaint only the lines where the drawn selection changed
+    unsafe fn set_sel_drawn(&mut self, new: (i32, i32)) {
+        let old = std::mem::replace(&mut self.sel_drawn, new);
+        if old == new { return; }
+        let spans = if old.0 == old.1 || new.0 == new.1 { [old, new] }
+            else { [(old.0.min(new.0), old.0.max(new.0)), (old.1.min(new.1), old.1.max(new.1))] };
+        let mut rc = RECT::default();
+        let _ = GetClientRect(self.edit, &mut rc);
+        let s = self.scale;
+        for (a, b) in spans {
+            if a >= b { continue; }
+            let mut p0 = POINT::default();
+            let mut p1 = POINT::default();
+            SendMessageW(self.edit, EM_POSFROMCHAR, WPARAM(&mut p0 as *mut _ as usize), LPARAM(a as isize));
+            SendMessageW(self.edit, EM_POSFROMCHAR, WPARAM(&mut p1 as *mut _ as usize), LPARAM(b as isize));
+            let lh = self.para_at(b).map_or(lh_title(), |i| self.pstyle[i].lh) + gap_title();
+            let r = RECT { left: 0, top: p0.y.min(p1.y) - 2, right: rc.right, bottom: p0.y.max(p1.y) + (lh * s).ceil() as i32 + 2 };
+            if r.bottom > 0 && r.top < rc.bottom { let _ = InvalidateRect(self.edit, Some(&r), false); }
+        }
+    }
     unsafe fn caret_off(&mut self) {
         if !self.car.on { return; }
         self.car.on = false;
@@ -2103,8 +2184,10 @@ impl App {
     /// the caret's box in RichEdit client px
     fn caret_box(&self) -> RECT {
         let c = &self.car;
-        let w = (2.0 * self.scale).round().max(1.0) as i32;
-        let x = c.x.round() as i32 - w / 2;
+        // Geologica leaves about one DIP between letters, just left of the reported position:
+        // a one-DIP caret fits that gap instead of touching the letters on both sides
+        let w = self.scale.round().max(1.0) as i32;
+        let x = c.x.round() as i32 - w;
         RECT { left: x, top: c.y.round() as i32, right: x + w, bottom: (c.y + c.h).round() as i32 }
     }
     unsafe fn tick_caret(&mut self, dt: f32) {
@@ -2115,12 +2198,12 @@ impl App {
         let moving = (c.tx - c.x).abs() > 0.4 || (c.ty - c.y).abs() > 0.4 || (c.th - c.h).abs() > 0.4;
         if !moving { c.x = c.tx; c.y = c.ty; c.h = c.th; }
         c.t += dt;
-        // solid for half a second after any move, then a soft blink: on .45s, fade .15s, off .3s, fade .15s
+        // solid for half a second after any move, then a soft blink: on .4s, fade .2s, off .3s, fade .2s
         let smooth = |v: f32| { let v = v.clamp(0.0, 1.0); v * v * (3.0 - 2.0 * v) };
         let (alpha, next) = if moving || c.t < 0.5 { (1.0, 0.5 - c.t) } else {
-            let p = (c.t - 0.5) % 1.05;
-            if p < 0.45 { (1.0, 0.45 - p) } else if p < 0.6 { (1.0 - smooth((p - 0.45) / 0.15), 0.0) }
-            else if p < 0.9 { (0.0, 0.9 - p) } else { (smooth((p - 0.9) / 0.15), 0.0) }
+            let p = (c.t - 0.5) % 1.1;
+            if p < 0.4 { (1.0, 0.4 - p) } else if p < 0.6 { (1.0 - smooth((p - 0.4) / 0.2), 0.0) }
+            else if p < 0.9 { (0.0, 0.9 - p) } else { (smooth((p - 0.9) / 0.2), 0.0) }
         };
         c.alpha = alpha;
         let interval = if moving || next < 0.02 { 16 } else { (next * 1000.0) as u32 + 1 };
@@ -4336,6 +4419,7 @@ extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 WM_LBUTTONDOWN if a.edit_click(lp) => return LRESULT(0),
                 WM_ERASEBKGND if a.edit_visible => return LRESULT(1),
                 WM_PAINT if a.edit_visible => {
+                    a.sync_sel();
                     let mut ps = PAINTSTRUCT::default();
                     let target = BeginPaint(hwnd, &mut ps);
                     if !target.is_invalid() && ps.rcPaint.left < ps.rcPaint.right && ps.rcPaint.top < ps.rcPaint.bottom {
@@ -4887,7 +4971,7 @@ fn main() -> Result<()> {
             ctl_open: false, ctl_a: Ease::at(1.0), cap_n: Ease::at(4.0), more_t: Ease::at(0.0), ctl_last: vec![], ctl_prev: vec![], ctl_fade: Ease::at(1.0),
             animating: false, last_frame: Instant::now(), fps: std::env::var("PANE_FPS").ok().map(|_| (0, 0.0, 0.0, 0.0)), previews: Default::default(), seg_anim: HashMap::new(), focus: (0, 0), kb_focus: false, last_cursor: (i32::MIN, 0), mouse_moved: false,
             autostart: false, hover_set: None, demo: false, slide: (Ease::at(0.0), Ease::at(0.0)), slide_base: POINT::default(), edit_visible: false, edit_snapshot: None, suspended_scroll: None, hiding: false, guard: false, caret_on: true, tick: Instant::now(), tray,
-            win_y: y as f32, win_y_to: y as f32, unfold_top: None, edit_top: y, undo: None, title_end: 0, car: Caret::default(), car_dc: ink_dc(), car_rect: RECT::default(), car_a: 0, seen: (0, 0, 0, 0, 0, false), wheel_delta: 0,
+            win_y: y as f32, win_y_to: y as f32, unfold_top: None, edit_top: y, undo: None, title_end: 0, car: Caret::default(), car_dc: ink_dc(), car_rect: RECT::default(), car_a: 0, seen: (0, 0, 0, 0, 0, false), sel_drawn: (0, 0), sel_hidden: None, wheel_delta: 0,
             pstyle: vec![], styled_text: vec![], links: vec![], codes: vec![], imgs: images::Images::new(), checkboxes: None,
         });
         APP = Box::into_raw(state);
