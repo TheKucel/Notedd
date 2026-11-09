@@ -39,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 static APP_EXE: &[u8] = include_bytes!(env!("NOTEDD_EXE"));
 static FONT: &[u8] = include_bytes!("../../assets/fonts/Geologica.ttf");
 static ICON: &[u8] = include_bytes!("../../assets/notedd.ico");
-const VERSION: &str = "1.2.1";
+const VERSION: &str = "1.2.2";
 
 // ---- geometry, DIPs ----
 const W: f32 = 640.0;

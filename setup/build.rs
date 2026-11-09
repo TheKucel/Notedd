@@ -41,8 +41,8 @@ fn main() {
 2 RCDATA "{}"
 3 RCDATA "{}"
 1 VERSIONINFO
-FILEVERSION 1,2,1,0
-PRODUCTVERSION 1,2,1,0
+FILEVERSION 1,2,2,0
+PRODUCTVERSION 1,2,2,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -50,9 +50,9 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Notedd"
       VALUE "FileDescription", "Установка Notedd"
-      VALUE "FileVersion", "1.2.1"
+      VALUE "FileVersion", "1.2.2"
       VALUE "ProductName", "Notedd"
-      VALUE "ProductVersion", "1.2.1"
+      VALUE "ProductVersion", "1.2.2"
       VALUE "OriginalFilename", "notedd-setup.exe"
     END
   END
