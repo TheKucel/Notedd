@@ -4,6 +4,7 @@ version = "1.2.0"
 edition = "2021"
 
 [dependencies]
+notedd-core = { path = "../core" }
 windows-core = "0.58"
 
 [dependencies.windows]

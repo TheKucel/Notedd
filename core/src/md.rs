@@ -36,10 +36,22 @@ pub fn image_path(line: &[u16]) -> Option<String> {
     let s = s.trim();
     if !(s.starts_with("![") && s.ends_with(')')) { return None; }
     let k = s.find("](")?;
-    let mut p = s[k + 2..s.len() - 1].trim();
-    if let Some(sp) = p.find(' ') { p = &p[..sp]; }
-    if p.starts_with('<') && p.ends_with('>') && p.len() >= 2 { p = &p[1..p.len() - 1]; }
+    let destination = &s[k + 2..s.len() - 1];
+    let mut p = link_target(destination);
+    if p == destination.trim() && !p.starts_with('<') { p = p.split_whitespace().next().unwrap_or(""); }
     if p.is_empty() { None } else { Some(p.to_string()) }
+}
+
+fn link_target(target: &str) -> &str {
+    let target = target.trim();
+    if let Some(angled) = target.strip_prefix('<') {
+        if let Some((path, _)) = angled.split_once('>') { return path; }
+    }
+    // A quoted title follows the path, separated by a space.
+    if let Some((path, title)) = target.split_once(" \"") {
+        if title.ends_with('"') { return path; }
+    }
+    target
 }
 
 /// the leading block marker ("## ", "> "), dimmed in the editor
@@ -54,6 +66,7 @@ pub fn mark_len(line: &[u16], b: &Block) -> usize {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[repr(u8)]
 pub enum Style { Mark, Bold, Italic, Strike, Highlight, Code, Link, Url }
 
 /// Opening and closing ranges around visible inline content, innermost first.
@@ -73,6 +86,54 @@ pub fn delimiters(line: &[u16]) -> Vec<(Range<usize>, Range<usize>)> {
     }).collect();
     pairs.sort_unstable_by_key(|(open, close)| close.start - open.end);
     pairs
+}
+
+/// Keeps pairs intact when an edit crosses hidden inline delimiters.
+pub fn preserve_delimiters(
+    text: &[u16], range: Range<usize>, mut pairs: Vec<(Range<usize>, Range<usize>)>, erase: bool,
+) -> Option<(Range<usize>, Vec<u16>, Vec<u16>)> {
+    if pairs.is_empty() { return None; }
+    let (mut a, mut b) = (range.start, range.end);
+    let original = (a, b);
+    for (open, close) in &pairs {
+        if a <= open.end && b >= close.start {
+            a = a.min(open.start);
+            b = b.max(close.end);
+        }
+    }
+    // Move a delimiter past whitespace exposed by an erase so its span stays valid.
+    let (mut left_space, mut right_space) = (a..a, b..b);
+    if erase {
+        let blank = |c| c != 13 && c != 10 && space(c);
+        let left = a - text[..a].iter().rev().take_while(|&&c| blank(c)).count();
+        let right = b + text[b..].iter().take_while(|&&c| blank(c)).count();
+        for (open, close) in &pairs {
+            if !matches!(text[open.start], 42 | 95 | 61) { continue; }
+            if left < a && left > open.end && b >= close.start {
+                left_space = left..a;
+                b = b.max(close.end);
+            }
+            if right > b && right < close.start && a <= open.end {
+                right_space = b..right;
+                a = a.min(open.start);
+            }
+        }
+    }
+    pairs.sort_unstable_by_key(|(l, _)| l.start);
+    let mut openings = Vec::new();
+    let mut closings = Vec::new();
+    for (open, close) in pairs {
+        if a <= open.end && b >= close.start { continue; }
+        if a < open.end && b > open.start { openings.extend_from_slice(&text[a.max(open.start)..b.min(open.end)]); }
+        if a < close.end && b > close.start { closings.push(a.max(close.start)..b.min(close.end)); }
+    }
+    let (start, end) = (a.min(left_space.start), b.max(right_space.end));
+    if (start, end) == original && openings.is_empty() && closings.is_empty() { return None; }
+    closings.sort_unstable_by_key(|r| r.start);
+    let before = closings.into_iter().flat_map(|r| text[r].iter().copied())
+        .chain(text[left_space].iter().copied()).collect();
+    let after = text[right_space].iter().copied().chain(openings).collect();
+    Some((start..end, before, after))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -193,7 +254,8 @@ fn scan(s: &[u16], from: usize, to: usize, sp: &mut Vec<Span>, ln: &mut Vec<Link
             while k + 1 < to && s[k] != b']' as u16 { k += 1; }
             if k + 1 < to && s[k] == b']' as u16 && s[k + 1] == b'(' as u16 {
                 if let Some(m) = (k + 2..to).find(|&m| s[m] == b')' as u16) {
-                    let url = String::from_utf16_lossy(&s[k + 2..m]).trim().to_string();
+                    let target = String::from_utf16_lossy(&s[k + 2..m]);
+                    let url = link_target(&target).to_owned();
                     push(sp, i, st, Style::Mark); push(sp, st, k, Style::Link); push(sp, k, k + 2, Style::Mark);
                     push(sp, k + 2, m, Style::Url); push(sp, m, m + 1, Style::Mark);
                     if st < k { ln.push(Link { a: st, b: k, url: url.clone() }); }
@@ -217,9 +279,9 @@ fn scan(s: &[u16], from: usize, to: usize, sp: &mut Vec<Span>, ln: &mut Vec<Link
     }
 }
 
-pub(super) fn space(c: u16) -> bool { char::from_u32(c as u32).is_some_and(char::is_whitespace) }
+pub fn space(c: u16) -> bool { char::from_u32(c as u32).is_some_and(char::is_whitespace) }
 
-fn hidden_mark(line: &[u16], span: &Span) -> bool {
+pub(crate) fn hidden_mark(line: &[u16], span: &Span) -> bool {
     span.style == Style::Mark || (span.style == Style::Url && span.a >= 3
         && starts(line, span.a - 2, "](") && line[span.a - 3] != b'[' as u16)
 }
@@ -371,6 +433,17 @@ mod tests {
         assert_eq!(format_edit(&u("*hello*"), 1..6, Format::Bold, true), Some((1..6, Some(&[42, 42][..]))));
         assert_eq!(format_edit(&u("**_hello_**"), 3..8, Format::Bold, true), Some((0..11, None)));
         assert_eq!(strip("==***hello***=="), "hello");
+    }
+
+    #[test]
+    fn simple_edits_keep_hidden_delimiters_paired() {
+        let text = u("A **b** C");
+        assert_eq!(preserve_delimiters(&text, 4..5, delimiters(&text), true),
+                   Some((2..7, Vec::new(), Vec::new())));
+        let text = u("A [abc](https://example.org) Z");
+        let tail = text.len();
+        assert_eq!(preserve_delimiters(&text, 4..tail, delimiters(&text), false),
+                   Some((4..tail, u("](https://example.org)"), Vec::new())));
     }
 
     #[test]

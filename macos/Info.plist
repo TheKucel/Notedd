@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Notedd</string>
+    <key>CFBundleExecutable</key>
+    <string>Notedd</string>
+    <key>CFBundleIconFile</key>
+    <string>Notedd</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.thekucel.notedd</string>
+    <key>CFBundleName</key>
+    <string>Notedd</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.2.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Notedd stores your Markdown notes and their attachments in your chosen notes folder.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

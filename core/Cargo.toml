@@ -1,0 +1,11 @@
+[package]
+name = "notedd-core"
+version = "1.2.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[features]
+macos-bridge = []

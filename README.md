@@ -14,7 +14,23 @@ The installer puts Notedd in `%LOCALAPPDATA%\Programs\Notedd` by default. You ca
 
 To remove it, use **Settings → Apps** in Windows or run `.\uninstall.exe --uninstall` from the install folder. Your notes stay where they are.
 
+## macOS
+
+Extract `notedd-setup-macos.zip` and open **Notedd Setup** on macOS 13 or later. The installer uses the same stack of cards as on Windows. Choose your theme, editor, global shortcut, and folders before installing. It supports Apple Silicon and Intel Macs and defaults to `~/Applications` on a fresh install. The setup app has an ad hoc signature and no Apple notarization. [Releases](https://github.com/TheKucel/Notedd/releases)
+
+Notedd runs without an icon in the Dock or menu bar and opens over the current workspace, including full-screen apps. Press `Control+Option+Space` to show or hide it and `Control+Option+N` to create a note from anywhere. Closing the window leaves it running in the background. You can also open Notedd from Applications to show its window again.
+
+Click the colored dot or press `Command+Shift+C` to change a note's color. In the stack, right-click a note to open its palette. Click the note tab or press `Command+P` for the stack, press `Command+F` to find in the current note, and press `Command+Shift+M` to switch between Markdown and Simple. Simple hides the markup while you write and displays pasted images in the note. Select text and right-click to format it.
+
+Drag the note tab or the top edge of the folder to move the window. It slows near a screen edge and snaps into place when released close enough. Open Settings with `Command+,`. The **General** tab lets you choose where the window slides from, set the speed, or turn edge snapping off. Notedd follows the macOS Reduce Motion setting.
+
+Notedd uses `~/Documents/Notedd` by default. To open notes from Windows, copy the Markdown files and their `assets` folder together, then use **Settings → General → Notes folder → Choose…** to open the copy.
+
+To build locally, install Xcode or its Command Line Tools and Rust. Run `rustup target add aarch64-apple-darwin x86_64-apple-darwin` and then `./macos/build.sh` from the repository root. The script produces `Notedd.app`, `Notedd Setup.app`, and the release archive `notedd-setup-macos.zip` in `macos/target`. Windows and macOS share the Rust library for Markdown parsing and note storage.
+
 ## Shortcuts
+
+These bindings are for Windows.
 
 | Keys | What they do |
 | --- | --- |

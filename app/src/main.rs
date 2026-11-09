@@ -14,7 +14,7 @@ mod images;
 mod layer;
 #[path = "../../locale.rs"]
 mod locale;
-mod md;
+use notedd_core::md;
 mod settings;
 mod shell;
 mod store;
@@ -1337,46 +1337,8 @@ impl App {
             a = cp - usize::from((0xdc00..=0xdfff).contains(&ch) && cp > 0);
             b = cp + 1 + usize::from((0xd800..=0xdbff).contains(&ch) && cp + 1 < text.len());
         }
-        let original = (a, b);
-        for (open, close) in &pairs {
-            if a <= open.end && b >= close.start {
-                a = a.min(open.start);
-                b = b.max(close.end);
-            }
-        }
-        // Move a delimiter past whitespace exposed by an erase so its span stays valid.
-        let (mut left_space, mut right_space) = (a..a, b..b);
-        if erase != 0 {
-            let blank = |c| c != 13 && c != 10 && md::space(c);
-            let left = a - text[..a].iter().rev().take_while(|&&c| blank(c)).count();
-            let right = b + text[b..].iter().take_while(|&&c| blank(c)).count();
-            for (open, close) in &pairs {
-                if !matches!(text[open.start], 42 | 95 | 61) { continue; }
-                if left < a && left > open.end && b >= close.start {
-                    left_space = left..a;
-                    b = b.max(close.end);
-                }
-                if right > b && right < close.start && a <= open.end {
-                    right_space = b..right;
-                    a = a.min(open.start);
-                }
-            }
-        }
-        pairs.sort_unstable_by_key(|(l, _)| l.start);
-        let mut openings = Vec::new();
-        let mut closings = Vec::new();
-        for (open, close) in pairs {
-            if a <= open.end && b >= close.start { continue; }
-            if a < open.end && b > open.start { openings.extend_from_slice(&text[a.max(open.start)..b.min(open.end)]); }
-            if a < close.end && b > close.start { closings.push(a.max(close.start)..b.min(close.end)); }
-        }
-        let (start, end) = (a.min(left_space.start), b.max(right_space.end));
-        if (start, end) == original && openings.is_empty() && closings.is_empty() { return None; }
-        closings.sort_unstable_by_key(|r| r.start);
-        let before = closings.into_iter().flat_map(|r| text[r].iter().copied())
-            .chain(text[left_space].iter().copied()).collect();
-        let after = text[right_space].iter().copied().chain(openings).collect();
-        Some((start as i32, end as i32, before, after))
+        md::preserve_delimiters(text, a..b, pairs, erase != 0)
+            .map(|(range, before, after)| (range.start as i32, range.end as i32, before, after))
     }
 
     unsafe fn simple_edit_key(&mut self, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
