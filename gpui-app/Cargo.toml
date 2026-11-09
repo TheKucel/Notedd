@@ -41,6 +41,7 @@ features = [
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
 taffy = { path = "vendor/taffy" }
+xattr = { path = "vendor/xattr" }
 
 [profile.release]
 opt-level = 3
