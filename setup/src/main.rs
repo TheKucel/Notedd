@@ -342,7 +342,7 @@ unsafe fn install(s: &Setup) -> std::result::Result<(), String> {
     let _ = shortcut(&programs.join("Notedd.lnk"), &exe, &icon);
     let desk = known(&FOLDERID_Desktop).join("Notedd.lnk");
     if s.desktop { let _ = shortcut(&desk, &exe, &icon); } else { let _ = std::fs::remove_file(&desk); }
-    if s.autostart { reg_set(RUN, w!("Notedd"), &format!("\"{}\"", exe.display())); } else { let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("Notedd")); }
+    if s.autostart { reg_set(RUN, w!("Notedd"), &format!("\"{}\" --background", exe.display())); } else { let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("Notedd")); }
     let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("Pane"));
 
     reg_set(UNINSTALL_KEY, w!("DisplayName"), "Notedd");

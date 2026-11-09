@@ -4846,9 +4846,11 @@ fn main() -> Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // the folder picker is a COM object
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        // started by Windows at sign-in: keep the process (tray + hotkeys) but don't show the window
+        let background = std::env::args().any(|a| a == "--background");
         // one instance only: a second launch just shows the running one
         if let Ok(h) = FindWindowW(w!("NoteddFolder"), None) {
-            if !h.0.is_null() { let _ = PostMessageW(h, WM_APPEAR, WPARAM(0), LPARAM(0)); return Ok(()); }
+            if !h.0.is_null() { if background { return Ok(()); } let _ = PostMessageW(h, WM_APPEAR, WPARAM(0), LPARAM(0)); return Ok(()); }
         }
 
         let instance = GetModuleHandleW(None)?;
@@ -4982,7 +4984,7 @@ fn main() -> Result<()> {
 
         a.register_globals();
         a.update_tray_tip();
-        a.appear();
+        if !background { a.appear(); }
         a.update_docked();
 
         // Sleep(1) really sleeps ~1 ms (only used to pace frames if DWM returns early)

@@ -150,7 +150,7 @@ pub fn set_autostart(on: bool) {
     unsafe {
         if on {
             let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            let v: Vec<u16> = format!("\"{exe}\"").encode_utf16().chain(Some(0)).collect();
+            let v: Vec<u16> = format!("\"{exe}\" --background").encode_utf16().chain(Some(0)).collect();
             let _ = RegSetKeyValueW(HKEY_CURRENT_USER, RUN, w!("Notedd"), REG_SZ.0, Some(v.as_ptr() as _), (v.len() * 2) as u32);
         } else {
             let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("Notedd"));
