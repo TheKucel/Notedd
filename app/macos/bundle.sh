@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds Notedd.app (Apple Silicon + Intel in one binary) and notedd-macos.zip in app/target/macos.
+# Builds Notedd.app (Apple Silicon + Intel in one binary), its installer Notedd Setup.app and
+# notedd-setup-macos.zip (the one file a release ships for the Mac) in app/target/macos.
 # Needs Xcode or its Command Line Tools, and: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 set -euo pipefail
 
@@ -56,7 +57,6 @@ NOTEDD_SETUP_TEST_DIR="$stage/self-test" "$setup/Contents/MacOS/Notedd Setup" --
 rm -rf "$out"
 mkdir -p "$out"
 ditto "$app" "$out/Notedd.app"
-ditto -c -k --keepParent "$app" "$out/notedd-macos.zip"
 ditto "$setup" "$out/Notedd Setup.app"
 ditto -c -k --keepParent "$setup" "$out/notedd-setup-macos.zip"
-printf '%s\n' "$PWD/$out/Notedd.app" "$PWD/$out/notedd-macos.zip" "$PWD/$out/Notedd Setup.app" "$PWD/$out/notedd-setup-macos.zip"
+printf '%s\n' "$PWD/$out/Notedd.app" "$PWD/$out/Notedd Setup.app" "$PWD/$out/notedd-setup-macos.zip"

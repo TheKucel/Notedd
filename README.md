@@ -22,7 +22,7 @@ To remove it, use **Settings → Apps** in Windows or run `.\uninstall.exe --uni
 
 ## macOS
 
-Extract `notedd-macos.zip` and move `Notedd.app` to Applications. It needs macOS 13 or later and runs on Apple Silicon and Intel Macs. The app has an ad hoc signature and no Apple notarization, so the first time, right-click it and choose **Open**.
+Download `notedd-setup-macos.zip` from [Releases](https://github.com/TheKucel/Notedd/releases), extract it and open `Notedd Setup.app`; it puts Notedd in `~/Applications` by default. Notedd needs macOS 13 or later and runs on Apple Silicon and Intel Macs. The installer has an ad hoc signature and no Apple notarization, so the first time, right-click it and choose **Open**.
 
 Notedd lives in the menu bar, with no icon in the Dock. The shortcuts below use `Command` where Windows uses `Ctrl`. Settings go in `~/Library/Application Support/Notedd/settings.txt`.
 
@@ -80,7 +80,7 @@ cargo build --release --locked --manifest-path setup/Cargo.toml
 
 The installer ends up at `setup/target/release/notedd-setup.exe`.
 
-On macOS, install Xcode or its Command Line Tools, run `rustup target add aarch64-apple-darwin x86_64-apple-darwin`, then `./app/macos/bundle.sh`. It produces `Notedd.app` and `notedd-macos.zip` in `app/target/macos`.
+On macOS, install Xcode or its Command Line Tools, run `rustup target add aarch64-apple-darwin x86_64-apple-darwin`, then `./app/macos/bundle.sh`. It produces `Notedd.app`, `Notedd Setup.app` and `notedd-setup-macos.zip` in `app/target/macos`.
 
 On Linux, install the X11, Wayland, xkbcommon, fontconfig, GTK 3 and AppIndicator development packages (the list is in `.github/workflows/build.yml`), then run `cargo build --release --locked --manifest-path app/Cargo.toml`.
 

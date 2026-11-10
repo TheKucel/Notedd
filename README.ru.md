@@ -22,7 +22,7 @@ Notedd работает на Windows 10 и 11 (x64). Скачайте и зап�
 
 ## macOS
 
-Распакуйте `notedd-macos.zip` и переместите `Notedd.app` в папку «Программы». Нужна macOS 13 или новее; поддерживаются компьютеры с Apple Silicon и Intel. У приложения временная подпись и нет нотариального заверения Apple, поэтому при первом запуске нажмите на него правой кнопкой мыши и выберите **Открыть**.
+Скачайте `notedd-setup-macos.zip` со страницы [релизов](https://github.com/TheKucel/Notedd/releases), распакуйте и откройте `Notedd Setup.app`; по умолчанию установщик помещает Notedd в `~/Applications`. Нужна macOS 13 или новее; поддерживаются компьютеры с Apple Silicon и Intel. У установщика временная подпись и нет нотариального заверения Apple, поэтому при первом запуске нажмите на него правой кнопкой мыши и выберите **Открыть**.
 
 Notedd находится в строке меню и не показывает значок в Dock. В сочетаниях клавиш внутри приложения вместо `Ctrl` используется `Command`. Настройки хранятся в `~/Library/Application Support/Notedd/settings.txt`.
 
@@ -80,7 +80,7 @@ cargo build --release --locked --manifest-path setup/Cargo.toml
 
 Установщик появится в `setup/target/release/notedd-setup.exe`.
 
-**macOS.** Установите Xcode или его Command Line Tools, выполните `rustup target add aarch64-apple-darwin x86_64-apple-darwin`, затем `./app/macos/bundle.sh`. В `app/target/macos` появятся `Notedd.app` и `notedd-macos.zip`.
+**macOS.** Установите Xcode или его Command Line Tools, выполните `rustup target add aarch64-apple-darwin x86_64-apple-darwin`, затем `./app/macos/bundle.sh`. В `app/target/macos` появятся `Notedd.app`, `Notedd Setup.app` и `notedd-setup-macos.zip`.
 
 **Linux.** Установите пакеты разработки X11, Wayland, xkbcommon, fontconfig, GTK 3 и AppIndicator (список находится в [build.yml](.github/workflows/build.yml)), затем выполните:
 

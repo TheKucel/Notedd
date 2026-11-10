@@ -65,9 +65,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: notedd-macos
-          path: |
-            app/target/macos/notedd-macos.zip
-            app/target/macos/notedd-setup-macos.zip
+          path: app/target/macos/notedd-setup-macos.zip
           if-no-files-found: error
 
   linux:
@@ -123,6 +121,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             notedd-setup.exe
-            notedd-macos.zip
             notedd-setup-macos.zip
             notedd-linux-x86_64.tar.gz
