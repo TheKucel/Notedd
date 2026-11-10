@@ -63,6 +63,9 @@ impl Metrics {
     }
 }
 
+/// How far each level of a nested list moves in, in unscaled pixels.
+const LEVEL_STEP: f32 = 24.;
+
 pub fn metrics(kind: &Kind, index: usize) -> Metrics {
     let m = |size, lh, before, after| Metrics { size, lh, bold: false, italic: false, mono: false, indent: 0., before, after, pad: 0. };
     // the old app: title 21/27, body 16/23, gaps 9 (3 between list items), code 14.5/21
@@ -159,8 +162,12 @@ impl ShapeCache {
         let mut out = Layout { blocks: Vec::with_capacity(doc.blocks.len()), height: 0., width };
         let mut y = 0.;
         let mut prev_after = 0.;
+        let nesting = notedd_editor::model::levels(&doc.blocks);
         for (i, b) in doc.blocks.iter().enumerate() {
-            let m = if single { metrics(&Kind::Para, 1).scaled(scale) } else { metrics(&b.kind, i).scaled(scale) };
+            let mut m = if single { metrics(&Kind::Para, 1) } else { metrics(&b.kind, i) };
+            // each level of a nested list moves the item (and its marker) in by one step
+            if !single && b.kind.is_list() { m.indent += nesting[i] as f32 * LEVEL_STEP; }
+            let m = m.scaled(scale);
             let text_w = (width - m.indent - 2. * m.pad).max(40.);
             y += m.before + prev_after;
             let top = m.pad;

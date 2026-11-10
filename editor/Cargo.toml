@@ -8,5 +8,9 @@ publish = false
 notedd-core = { path = "../core" }
 unicode-segmentation = "1.13"
 
+[dev-dependencies]
+# a reference reader: the tests check that what Notedd writes means the same to a standard CommonMark parser
+pulldown-cmark = { version = "0.13", default-features = false }
+
 [profile.release]
 opt-level = 3

@@ -168,7 +168,7 @@ impl Core {
         // Only images between the end of one paragraph and the start of the next:
         // remove the images, do not glue the paragraphs.
         if a_end && !b_img && b.off == 0 && b.block > a.block + 1 && (a.block + 1..b.block).all(|i| self.image(i)) {
-            self.doc.blocks.drain(a.block + 1..b.block);
+            self.doc.blocks.drain(a.block + 1..b.block); self.doc.fix();
             return a;
         }
         let a_code = !a_img && self.doc.blocks[a.block].kind.is_code();
@@ -177,23 +177,23 @@ impl Core {
             // deleted head of its text) and `a` keeps only its own head.
             if !b_img { self.doc.blocks[b.block].replace(0, b.off, Vec::new()); }
             if a_img {
-                self.doc.blocks.drain(a.block..b.block);
+                self.doc.blocks.drain(a.block..b.block); self.doc.fix();
                 return Pos::new(a.block, 0);
             }
             let n = self.blen(a.block);
             self.doc.blocks[a.block].replace(a.off, n, Vec::new());
-            self.doc.blocks.drain(a.block + 1..b.block);
+            self.doc.blocks.drain(a.block + 1..b.block); self.doc.fix();
             return a;
         }
         let head = if a_img { Vec::new() } else { self.doc.blocks[a.block].slice(0, a.off) };
         let head_len: usize = head.iter().map(|r| r.text.len()).sum();
         let tb = &self.doc.blocks[b.block];
         let tail = tb.slice(b.off, tb.len());
-        let kind = if a_img { tb.kind.clone() } else { self.doc.blocks[a.block].kind.clone() };
+        let (kind, indent) = if a_img { (tb.kind.clone(), tb.indent) } else { (self.doc.blocks[a.block].kind.clone(), self.doc.blocks[a.block].indent) };
         let mut runs = head;
         runs.extend(tail);
         normalize(&mut runs);
-        self.doc.blocks.splice(a.block..=b.block, [Block { kind, runs }]);
+        self.doc.blocks.splice(a.block..=b.block, [Block { kind, runs, indent }]);
         self.doc.fix();
         Pos::new(a.block, head_len)
     }
@@ -220,7 +220,7 @@ impl Core {
         let i = p.block;
         if self.image(i) {
             self.checkpoint(EditKind::Other);
-            self.doc.blocks.remove(i);
+            self.doc.blocks.remove(i); self.doc.fix();
             let q = self.clamp(Pos::new(i - 1, usize::MAX));
             self.anchor = q; self.head = q; self.typing = None;
             return;
@@ -236,20 +236,27 @@ impl Core {
         // At the start of a block.
         if self.doc.blocks[i].kind != Kind::Para {
             self.checkpoint(EditKind::Other);
-            self.set_kind_range(i, i, Kind::Para);
+            let level = levels(&self.doc.blocks)[i];
+            if level > 0 {
+                // a nested item steps out one level before it stops being an item
+                self.doc.blocks[i].indent = level - 1;
+                self.doc.fix();
+            } else {
+                self.set_kind_range(i, i, Kind::Para);
+            }
             return;
         }
         let prev = i - 1;
         if self.image(prev) {
             // First press selects the picture (an empty line below it is dropped).
             self.checkpoint(EditKind::Other);
-            if self.doc.blocks[i].is_empty() && i + 1 < self.doc.blocks.len() { self.doc.blocks.remove(i); }
+            if self.doc.blocks[i].is_empty() && i + 1 < self.doc.blocks.len() { self.doc.blocks.remove(i); self.doc.fix(); }
             self.anchor = Pos::new(prev, 0); self.head = self.anchor; self.typing = None;
             return;
         }
         if self.doc.blocks[prev].kind.is_code() {
             self.checkpoint(EditKind::Other);
-            if self.doc.blocks[i].is_empty() { self.doc.blocks.remove(i); }
+            if self.doc.blocks[i].is_empty() { self.doc.blocks.remove(i); self.doc.fix(); }
             let q = Pos::new(prev, self.blen(prev));
             self.anchor = q; self.head = q; self.typing = None;
             return;
@@ -268,6 +275,7 @@ impl Core {
         if b.kind.is_code() { for r in &mut runs { r.marks = Marks::default(); } }
         b.runs.extend(runs);
         normalize(&mut b.runs);
+        self.doc.fix();
         Pos::new(i, at)
     }
 
@@ -277,7 +285,7 @@ impl Core {
         let i = p.block;
         if self.image(i) {
             self.checkpoint(EditKind::Other);
-            self.doc.blocks.remove(i);
+            self.doc.blocks.remove(i); self.doc.fix();
             let q = if i < self.doc.blocks.len() { self.clamp(Pos::new(i, 0)) } else { self.clamp(Pos::new(i - 1, usize::MAX)) };
             self.anchor = q; self.head = q; self.typing = None;
             return;
@@ -300,13 +308,13 @@ impl Core {
         if self.doc.blocks[next].kind.is_code() {
             // Do not pull code into a paragraph; an empty line makes way for it.
             if self.doc.blocks[i].is_empty() && i > 0 {
-                self.doc.blocks.remove(i);
+                self.doc.blocks.remove(i); self.doc.fix();
                 self.anchor = Pos::new(i, 0); self.head = self.anchor;
             }
             return;
         }
         if self.doc.blocks[i].is_empty() && i > 0 && self.doc.blocks[i].kind == Kind::Para {
-            self.doc.blocks.remove(i);
+            self.doc.blocks.remove(i); self.doc.fix();
             self.anchor = Pos::new(i, 0); self.head = self.anchor; self.typing = None;
             return;
         }
@@ -322,6 +330,32 @@ impl Core {
         let p = self.delete_range(from, self.head);
         self.anchor = p; self.head = p; self.typing = None;
     }
+    /// Tab / Shift+Tab: move the selected list items one level deeper or shallower, with the
+    /// items nested under them. Returns false (and changes nothing) when there is nothing to move.
+    pub fn change_indent(&mut self, deeper: bool) -> bool {
+        let (s, e) = self.sel();
+        let lv = levels(&self.doc.blocks);
+        let list = |i: usize| self.doc.blocks[i].kind.is_list();
+        let mut moving = std::collections::BTreeSet::new();
+        for i in s.block..=e.block {
+            if !list(i) || (!deeper && lv[i] == 0) { continue; }
+            moving.insert(i);
+            let mut j = i + 1;
+            while j < lv.len() && list(j) && lv[j] > lv[i] { moving.insert(j); j += 1; }
+        }
+        if moving.is_empty() { return false; }
+        for &i in &moving {
+            if deeper && lv[i] >= MAX_INDENT { return false; }
+            // an item can sit at most one level below the item above it
+            if deeper && !moving.contains(&i.wrapping_sub(1)) && !(i > 0 && list(i - 1) && lv[i] <= lv[i - 1]) { return false; }
+        }
+        self.checkpoint(EditKind::Other);
+        for &i in &moving { self.doc.blocks[i].indent = if deeper { lv[i] + 1 } else { lv[i] - 1 }; }
+        self.doc.fix();
+        self.typing = None;
+        true
+    }
+
     /// Ctrl+Delete: the word after the caret (at the end of a block it behaves like Delete).
     pub fn delete_word_forward(&mut self) {
         if !self.collapsed() { self.backspace(); return; }
@@ -516,9 +550,16 @@ impl Core {
             self.head = self.anchor;
             return;
         }
-        // Enter on an empty list item or quote ends it.
+        // Enter on an empty list item or quote ends it; a nested item first steps out one level.
         if len == 0 && i > 0 && (kind.is_list() || kind == Kind::Quote) {
-            self.doc.blocks[i].kind = Kind::Para;
+            let level = levels(&self.doc.blocks)[i];
+            if kind.is_list() && level > 0 {
+                self.doc.blocks[i].indent = level - 1;
+            } else {
+                self.doc.blocks[i].kind = Kind::Para;
+                self.doc.blocks[i].indent = 0;
+            }
+            self.doc.fix();
             return;
         }
         if i > 0 && kind == Kind::Para && p.off == len {
@@ -551,7 +592,8 @@ impl Core {
             Kind::Quote => Kind::Quote,
             _ => Kind::Para,
         };
-        self.doc.blocks.insert(i + 1, Block { kind: next_kind, runs: tail });
+        let indent = if next_kind.is_list() { b.indent } else { 0 };
+        self.doc.blocks.insert(i + 1, Block { kind: next_kind, runs: tail, indent });
         self.anchor = Pos::new(i + 1, 0);
         self.head = self.anchor;
     }
@@ -683,13 +725,14 @@ impl Core {
             b.replace(p.off, len, Vec::new());
             if b.is_empty() && i > 0 && b.kind == Kind::Para && tail.is_empty() {
                 // An empty line is replaced by the picture.
-                self.doc.blocks.remove(i);
+                self.doc.blocks.remove(i); self.doc.fix();
                 i -= 1;
             }
         }
         self.doc.blocks.insert(i + 1, Block::new(Kind::Image(path.to_string())));
         let after_ok = self.doc.blocks.get(i + 2).is_some_and(|b| !b.kind.is_image()) && tail.is_empty();
-        if !after_ok { self.doc.blocks.insert(i + 2, Block { kind: Kind::Para, runs: tail }); }
+        if !after_ok { self.doc.blocks.insert(i + 2, Block { kind: Kind::Para, runs: tail, indent: 0 }); }
+        self.doc.fix();
         self.anchor = Pos::new(i + 2, 0);
         self.head = self.anchor;
         self.typing = None;
@@ -710,19 +753,23 @@ impl Core {
         let b = &self.doc.blocks;
         if s.block == e.block {
             let blk = &b[s.block];
-            return vec![Block { kind: blk.kind.clone(), runs: blk.slice(s.off, e.off) }];
+            return vec![Block { kind: blk.kind.clone(), runs: blk.slice(s.off, e.off), indent: blk.indent }];
         }
         let mut out = Vec::new();
         let first = &b[s.block];
-        out.push(if first.kind.is_image() { first.clone() } else { Block { kind: first.kind.clone(), runs: first.slice(s.off, first.len()) } });
+        out.push(if first.kind.is_image() { first.clone() } else { Block { kind: first.kind.clone(), runs: first.slice(s.off, first.len()), indent: first.indent } });
         out.extend(b[s.block + 1..e.block].iter().cloned());
         let last = &b[e.block];
-        if !last.kind.is_image() { out.push(Block { kind: last.kind.clone(), runs: last.slice(0, e.off) }); }
+        if !last.kind.is_image() { out.push(Block { kind: last.kind.clone(), runs: last.slice(0, e.off), indent: last.indent }); }
         out
     }
     /// Markdown for the clipboard: one block is copied as its inline text.
     pub fn selection_markdown(&self) -> String {
-        let blocks = self.copy_blocks();
+        let mut blocks = self.copy_blocks();
+        // the copy starts at the top level, however deep it sat
+        let (all, first) = (crate::model::levels(&self.doc.blocks), self.sel().0.block);
+        let base = blocks.iter().enumerate().filter(|(_, b)| b.kind.is_list()).map(|(k, _)| all[first + k]).min().unwrap_or(0);
+        for (k, b) in blocks.iter_mut().enumerate() { b.indent = all[first + k].saturating_sub(base); }
         match blocks.as_slice() {
             [b] if b.kind.is_image() => markdown::write_blocks(&blocks),
             [b] if b.kind.is_code() => b.text(),
@@ -813,7 +860,7 @@ impl Core {
             at += 1;
         }
         if n > 0 && !last_text {
-            self.doc.blocks.insert(at + 1, Block { kind: Kind::Para, runs: tail });
+            self.doc.blocks.insert(at + 1, Block { kind: Kind::Para, runs: tail, indent: 0 });
             caret = Pos::new(at + 1, 0);
         } else if n == 0 {
             let b = &mut self.doc.blocks[i];

@@ -19,7 +19,7 @@ actions!(
         Backspace, Delete, Enter, CtrlEnter, Left, Right, Up, Down, SelectLeft, SelectRight, SelectUp, SelectDown,
         WordLeft, WordRight, SelectWordLeft, SelectWordRight, Home, End, SelectHome, SelectEnd, DocStart, DocEnd,
         SelectDocStart, SelectDocEnd, SelectAll, Copy, Cut, Paste, Undo, Redo, Bold, Italic, Strike, Highlight, Code,
-        DeleteWordBack, DeleteWordForward, DeleteLineBack, Cancel, PageUp, PageDown, SelectPageUp, SelectPageDown,
+        DeleteWordBack, DeleteWordForward, DeleteLineBack, Cancel, PageUp, PageDown, SelectPageUp, SelectPageDown, Indent, Outdent,
     ]
 );
 
@@ -68,6 +68,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-e", Code, c),
         KeyBinding::new("ctrl-backspace", DeleteWordBack, c),
         KeyBinding::new("ctrl-delete", DeleteWordForward, c),
+        KeyBinding::new("tab", Indent, c),
+        KeyBinding::new("shift-tab", Outdent, c),
         KeyBinding::new("pageup", PageUp, c),
         KeyBinding::new("pagedown", PageDown, c),
         KeyBinding::new("shift-pageup", SelectPageUp, c),
@@ -103,6 +105,17 @@ pub fn debug_log(line: &str) {
 }
 
 fn al_(mut c: Hsla, o: f32) -> Hsla { c.a *= o; c }
+
+/// What stands beside each list item: a bullet that changes with the level, or the item's number.
+fn list_markers(blocks: &[Block]) -> Vec<Option<String>> {
+    const BULLETS: [&str; 4] = ["•", "◦", "▪", "•"];
+    let (levels, numbers) = (notedd_editor::model::levels(blocks), notedd_editor::model::numbering(blocks));
+    blocks.iter().enumerate().map(|(i, b)| match b.kind {
+        Kind::Bullet => Some(BULLETS[(levels[i] as usize).min(BULLETS.len() - 1)].to_string()),
+        Kind::Number => Some(format!("{}.", numbers[i])),
+        _ => None,
+    }).collect()
+}
 
 fn floor(text: &str, mut byte: usize) -> usize {
     byte = byte.min(text.len());
@@ -414,6 +427,28 @@ impl Editor {
     fn vertical(&mut self, up: bool, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.single { cx.emit(EditorEvent::Nav(if up { -1 } else { 1 })); return; }
         self.vertical_by(up, extend, false, window, cx);
+    }
+
+    /// Tab / Shift+Tab: nest the list items under the caret one level deeper or shallower. In the
+    /// Markdown view they indent the line by four spaces; anywhere else the key goes on to the window.
+    fn tab(&mut self, deeper: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.single { cx.propagate(); return; }
+        self.marked = None;
+        if self.raw {
+            if deeper { self.type_raw("    "); self.changed(window, cx); return; }
+            let h = self.core.head;
+            let spaces = self.core.doc.blocks[h.block].text().bytes().take_while(|&c| c == b' ').count().min(4);
+            if spaces == 0 { return; }
+            self.core.set_selection(Pos::new(h.block, 0), Pos::new(h.block, spaces));
+            self.core.delete_selection();
+            let caret = Pos::new(h.block, h.off.saturating_sub(spaces));
+            self.core.set_selection(caret, caret);
+            self.changed(window, cx);
+        } else if self.core.change_indent(deeper) {
+            self.changed(window, cx);
+        } else {
+            cx.propagate();
+        }
     }
 
     /// PageUp / PageDown: the caret moves a view's height, keeping its column.
@@ -796,12 +831,7 @@ impl Render for Editor {
                 if let Some(n) = new { self.scroll.set_offset(point(px(0.), px(n.min(0.)))); }
             }
         }
-        let mut n = 0;
-        let markers: Vec<Option<String>> = self.core.doc.blocks.iter().map(|b| match b.kind {
-            Kind::Bullet => { n = 0; Some("•".to_string()) }
-            Kind::Number => { n += 1; Some(format!("{n}.")) }
-            _ => { n = 0; None }
-        }).collect();
+        let markers = list_markers(&self.core.doc.blocks);
         let finds = self.matches();
         let cur = {
             let (s, z) = self.core.sel();
@@ -848,6 +878,8 @@ impl Render for Editor {
             .on_action(cx.listener(|e, _: &Delete, w, cx| { e.core.delete_forward(); e.changed(w, cx); }))
             .on_action(cx.listener(|e, _: &DeleteWordBack, w, cx| { e.core.delete_word_back(); e.changed(w, cx); }))
             .on_action(cx.listener(|e, _: &DeleteWordForward, w, cx| { e.marked = None; e.core.delete_word_forward(); e.changed(w, cx); }))
+            .on_action(cx.listener(|e, _: &Indent, w, cx| e.tab(true, w, cx)))
+            .on_action(cx.listener(|e, _: &Outdent, w, cx| e.tab(false, w, cx)))
             .on_action(cx.listener(|e, _: &PageUp, w, cx| e.page(true, false, w, cx)))
             .on_action(cx.listener(|e, _: &PageDown, w, cx| e.page(false, false, w, cx)))
             .on_action(cx.listener(|e, _: &SelectPageUp, w, cx| e.page(true, true, w, cx)))
@@ -1051,12 +1083,7 @@ impl Preview {
         let th = Theme::from_app(app).faded(alpha);
         let salt = app.salt() ^ (alpha.to_bits() as u64);
         let layout = Rc::new(self.cache.layout(&self.doc, width, &th, salt, scale, false, &mut self.pics, window));
-        let mut n = 0;
-        let markers = self.doc.blocks.iter().map(|b| match b.kind {
-            Kind::Bullet => { n = 0; Some("•".to_string()) }
-            Kind::Number => { n += 1; Some(format!("{n}.")) }
-            _ => { n = 0; None }
-        }).collect();
+        let markers = list_markers(&self.doc.blocks);
         let mut finds = Vec::new();
         if !query.is_empty() {
             for (i, b) in self.doc.blocks.iter().enumerate() {

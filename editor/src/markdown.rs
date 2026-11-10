@@ -80,9 +80,31 @@ fn closes_fence(line: &str, n: usize) -> bool {
     t.len() >= n && t.bytes().all(|c| c == b'`')
 }
 
+/// The width of the whitespace that starts `line` (a tab reaches the next multiple of 4) and what follows it.
+fn split_lead(line: &str) -> (usize, &str) {
+    let mut width = 0;
+    for (i, c) in line.char_indices() {
+        match c {
+            ' ' => width += 1,
+            '\t' => width += 4 - width % 4,
+            _ => return (width, &line[i..]),
+        }
+    }
+    (width, "")
+}
+
+/// The level of a list item indented by `width`, given the indents of the open levels above it.
+fn level_for(open: &mut Vec<usize>, width: usize) -> u8 {
+    while open.last().is_some_and(|&w| w > width) { open.pop(); }
+    if open.last() != Some(&width) { open.push(width); }
+    (open.len() - 1).min(MAX_INDENT as usize) as u8
+}
+
 pub fn parse_blocks(src: &str) -> Vec<Block> {
     let lines: Vec<&str> = src.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
     let mut out: Vec<Block> = Vec::new();
+    // the indents of the list items above, one per open level
+    let mut levels: Vec<usize> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -98,28 +120,35 @@ pub fn parse_blocks(src: &str) -> Vec<Block> {
             let text = body.join("\n");
             if !text.is_empty() { b.runs.push(Run::new(text, Marks::default())); }
             out.push(b);
+            levels.clear();
             continue;
         }
         i += 1;
         let n = t.bytes().take_while(|&c| c == b'#').count();
         let block = if (1..=6).contains(&n) && t[n..].starts_with(' ') {
-            Block { kind: Kind::Heading(n.min(3) as u8), runs: parse_inline(&t[n + 1..]) }
+            Block { kind: Kind::Heading(n.min(3) as u8), runs: parse_inline(&t[n + 1..]), indent: 0 }
         } else if let Some(r) = t.strip_prefix('>') {
-            Block { kind: Kind::Quote, runs: parse_inline(r.strip_prefix(' ').unwrap_or(r)) }
+            Block { kind: Kind::Quote, runs: parse_inline(r.strip_prefix(' ').unwrap_or(r)), indent: 0 }
         } else if let Some(path) = md::image_path(&line.encode_utf16().collect::<Vec<_>>()) {
             let w = line.find("notedd-width=").and_then(|i| { let d: String = line[i + 13..].chars().take_while(char::is_ascii_digit).collect(); d.parse::<u32>().ok() });
             Block::new(Kind::Image(match w { Some(w) => format!("{path}\x01{w}"), None => path }))
         } else {
-            let (k, rest) = store::marker(line);
+            // A list item may be indented: how far decides how deep it sits.
+            let (width, body) = split_lead(line);
+            let (k, rest) = store::marker(body);
             match k {
-                ListKind::Bullet => match store::task(k, rest) {
-                    Some((done, r)) => Block { kind: Kind::Todo(done), runs: parse_inline(r) },
-                    None => Block { kind: Kind::Bullet, runs: parse_inline(rest) },
-                },
-                ListKind::Number => Block { kind: Kind::Number, runs: parse_inline(rest) },
-                _ => Block { kind: Kind::Para, runs: parse_inline(line) },
+                ListKind::Bullet => {
+                    let indent = level_for(&mut levels, width);
+                    match store::task(k, rest) {
+                        Some((done, r)) => Block { kind: Kind::Todo(done), runs: parse_inline(r), indent },
+                        None => Block { kind: Kind::Bullet, runs: parse_inline(rest), indent },
+                    }
+                }
+                ListKind::Number => Block { kind: Kind::Number, runs: parse_inline(rest), indent: level_for(&mut levels, width) },
+                _ => Block { kind: Kind::Para, runs: parse_inline(line), indent: 0 },
             }
         };
+        if !block.kind.is_list() { levels.clear(); }
         out.push(block);
     }
     if out.is_empty() { out.push(Block::new(Kind::Para)); }
@@ -134,7 +163,7 @@ pub fn parse(src: &str) -> Doc {
         Kind::Image(_) | Kind::Code(_) => blocks.insert(0, Block::new(Kind::Para)),
         _ => {
             let first = src.lines().next().unwrap_or("");
-            blocks[0] = Block { kind: Kind::Para, runs: parse_inline(first) };
+            blocks[0] = Block { kind: Kind::Para, runs: parse_inline(first), indent: 0 };
         }
     }
     let mut d = Doc { blocks };
@@ -221,20 +250,27 @@ fn block_like(line: &str) -> Option<usize> {
     let hashes = t.bytes().take_while(|&c| c == b'#').count();
     if t.starts_with("```") || t.starts_with('>') || ((1..=6).contains(&hashes) && t[hashes..].starts_with(' ')) { return Some(lead); }
     if md::image_path(&line.encode_utf16().collect::<Vec<_>>()).is_some() { return Some(lead); }
-    let d = line.bytes().take_while(u8::is_ascii_digit).count();
-    match store::marker(line).0 {
-        ListKind::Bullet => Some(0),
-        ListKind::Number => Some(d),
+    // a list marker counts after any indent
+    let (_, body) = split_lead(line);
+    let ws = line.len() - body.len();
+    let d = body.bytes().take_while(u8::is_ascii_digit).count();
+    match store::marker(body).0 {
+        ListKind::Bullet => Some(ws),
+        ListKind::Number => Some(ws + d),
         _ => None,
     }
 }
 
+/// Four spaces per level: deep enough to nest under both "- " and "1. " in any Markdown reader.
+const INDENT: &str = "    ";
+
 pub fn write_blocks(blocks: &[Block]) -> String {
     let mut out = String::new();
-    let mut n = 0;
+    let (levels, numbers) = (levels(blocks), numbering(blocks));
     for (i, b) in blocks.iter().enumerate() {
         if i > 0 { out.push('\n'); }
-        if matches!(b.kind, Kind::Number) { n += 1; } else { n = 0; }
+        let n = numbers[i];
+        if b.kind.is_list() { for _ in 0..levels[i] { out.push_str(INDENT); } }
         match &b.kind {
             Kind::Para => {
                 let line = write_inline(&b.runs);

@@ -52,8 +52,36 @@ impl Pos {
     pub fn new(block: usize, off: usize) -> Pos { Pos { block, off } }
 }
 
+/// The deepest nesting a list item can have (0 is the top level).
+pub const MAX_INDENT: u8 = 3;
+
+/// `indent` is how deep a list item sits; it means nothing for other kinds.
+/// Read it through `levels`, which keeps an item at most one level below the one before it.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Block { pub kind: Kind, pub runs: Vec<Run> }
+pub struct Block { pub kind: Kind, pub runs: Vec<Run>, pub indent: u8 }
+
+/// The nesting level of every block: 0 for anything but a list item, and a list item
+/// is at most one level deeper than the list item right before it.
+pub fn levels(blocks: &[Block]) -> Vec<u8> {
+    let mut prev: Option<u8> = None;
+    blocks.iter().map(|b| {
+        if !b.kind.is_list() { prev = None; return 0; }
+        let l = b.indent.min(prev.map_or(0, |p| p + 1)).min(MAX_INDENT);
+        prev = Some(l);
+        l
+    }).collect()
+}
+
+/// The number shown beside each numbered item (0 for the rest). Every level counts on its own.
+pub fn numbering(blocks: &[Block]) -> Vec<usize> {
+    let mut n = [0usize; MAX_INDENT as usize + 1];
+    levels(blocks).into_iter().zip(blocks).map(|(l, b)| {
+        let l = l as usize;
+        if !b.kind.is_list() { n = [0; MAX_INDENT as usize + 1]; return 0; }
+        for k in l + 1..n.len() { n[k] = 0; }
+        if b.kind == Kind::Number { n[l] += 1; n[l] } else { n[l] = 0; 0 }
+    }).collect()
+}
 
 /// The part of `runs` between byte offsets `a..b`.
 pub fn cut(runs: &[Run], a: usize, b: usize) -> Vec<Run> {
@@ -81,7 +109,7 @@ pub fn normalize(runs: &mut Vec<Run>) {
 }
 
 impl Block {
-    pub fn new(kind: Kind) -> Block { Block { kind, runs: Vec::new() } }
+    pub fn new(kind: Kind) -> Block { Block { kind, runs: Vec::new(), indent: 0 } }
     pub fn para(text: &str) -> Block {
         let mut b = Block::new(Kind::Para);
         if !text.is_empty() { b.runs.push(Run::new(text, Marks::default())); }
@@ -141,11 +169,13 @@ impl Doc {
     pub fn check(&self) -> Result<(), String> {
         let first = self.blocks.first().ok_or("empty document")?;
         if first.kind != Kind::Para { return Err(format!("block 0 is {:?}", first.kind)); }
+        let lv = levels(&self.blocks);
         for (i, b) in self.blocks.iter().enumerate() {
             if b.kind.is_image() && !b.runs.is_empty() { return Err(format!("image {i} has text")); }
             if b.kind.is_code() && b.runs.iter().any(|r| !r.marks.plain()) { return Err(format!("code {i} has marks")); }
             if b.runs.iter().any(|r| r.text.is_empty()) { return Err(format!("empty run in {i}")); }
             if b.runs.windows(2).any(|w| w[0].marks == w[1].marks) { return Err(format!("unmerged runs in {i}")); }
+            if b.indent != lv[i] { return Err(format!("block {i} is indented {} but sits at level {}", b.indent, lv[i])); }
         }
         Ok(())
     }
@@ -154,7 +184,9 @@ impl Doc {
         if self.blocks.first().is_none_or(|b| b.kind != Kind::Para) {
             self.blocks.insert(0, Block::new(Kind::Para));
         }
-        for b in &mut self.blocks {
+        let lv = levels(&self.blocks);
+        for (b, l) in self.blocks.iter_mut().zip(lv) {
+            b.indent = l;
             if b.kind.is_image() { b.runs.clear(); }
             if b.kind.is_code() { for r in &mut b.runs { r.marks = Marks::default(); } }
             normalize(&mut b.runs);

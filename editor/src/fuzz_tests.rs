@@ -27,7 +27,7 @@ fn rand_pos(c: &Core, r: &mut Rng) -> Pos {
 }
 
 fn step(c: &mut Core, r: &mut Rng) -> &'static str {
-    match r.below(22) {
+    match r.below(24) {
         0..=4 => { c.insert_text(WORDS[r.below(WORDS.len())]); "insert" }
         5 => { c.enter(); "enter" }
         6 | 7 => { c.backspace(); "backspace" }
@@ -44,6 +44,8 @@ fn step(c: &mut Core, r: &mut Rng) -> &'static str {
         18 => { c.delete_word_back(); "wordback" }
         19 => { let p = c.next_pos(c.head); c.move_to(p, r.below(2) == 0); "next" }
         20 => { c.ctrl_enter(); "ctrl-enter" }
+        21 => { c.change_indent(true); "tab" }
+        22 => { c.change_indent(false); "shift-tab" }
         _ => { c.select_all(); c.toggle_mark(BOLD); "all" }
     }
 }
@@ -53,7 +55,7 @@ fn plain(doc: &Doc) -> Vec<(String, String)> {
         let k = match &b.kind { Kind::Number => "num".to_string(), k => format!("{k:?}") };
         let t = b.text();
         (k, t)
-    }).collect()
+    }).zip(levels(&doc.blocks)).map(|((k, t), l)| (format!("{k}@{l}"), t)).collect()
 }
 
 fn check(c: &Core, ctx: &str) {
