@@ -63,7 +63,8 @@ fn main() {
                 window_decorations: Some(WindowDecorations::Client),
                 window_min_size: Some(size(px(522.), px(330.))),
                 app_id: Some("Notedd".into()),
-                show: !background,
+                // Finish configuring the nonactivating panel before asking AppKit for focus.
+                show: !background && !cfg!(target_os = "macos"),
                 ..Default::default()
             },
             |window, cx| {
@@ -77,6 +78,12 @@ fn main() {
             },
         )
         .expect("open window");
+        #[cfg(target_os = "macos")]
+        if !background {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |shell, window, cx| shell.appear(window, cx));
+            });
+        }
         let shell = handle.entity(cx).expect("shell");
         cx.spawn(async move |cx| {
             while let Ok(cmd) = rx.recv().await {
@@ -125,6 +132,7 @@ fn main() {
             }).detach();
         }
         cx.on_window_closed(|cx| if cx.windows().is_empty() { cx.quit(); }).detach();
+        #[cfg(not(target_os = "macos"))]
         if !background { cx.activate(true); }
     });
 }

@@ -20,28 +20,43 @@ sed "s/VERSION/$version/g" macos/Info.plist > "$app/Contents/Info.plist"
 lipo -create target/aarch64-apple-darwin/release/notedd target/x86_64-apple-darwin/release/notedd \
     -output "$app/Contents/MacOS/Notedd"
 
-# the icon: the .ico's largest picture, in three sizes, packed as ICNS chunks (four-byte type, big-endian length)
-sips -s format png ../assets/notedd.ico --out "$stage/ic08.png" >/dev/null
-sips -z 32 32 "$stage/ic08.png" --out "$stage/icp5.png" >/dev/null
-sips -z 128 128 "$stage/ic08.png" --out "$stage/ic07.png" >/dev/null
-perl -e '
-    my $chunks = "";
-    for my $path (@ARGV) {
-        open my $file, "<:raw", $path or die "$path: $!";
-        my $png = do { local $/; <$file> };
-        my ($type) = $path =~ m{/([a-z0-9]{4})\.png$};
-        $chunks .= pack("a4N", $type, 8 + length $png) . $png;
-    }
-    binmode STDOUT;
-    print pack("a4N", "icns", 8 + length $chunks), $chunks;
-' "$stage"/{icp5,ic07,ic08}.png > "$app/Contents/Resources/Notedd.icns"
+# Supply every standard and Retina size so Finder can choose the right representation.
+iconset="$stage/Notedd.iconset"
+mkdir -p "$iconset"
+sips -s format png ../assets/notedd.ico --out "$stage/icon.png" >/dev/null
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$stage/icon.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    sips -z "$double" "$double" "$stage/icon.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app/Contents/Resources/Notedd.icns"
 
 # ad hoc signature: Apple Silicon runs nothing unsigned; not notarized
 codesign --force --sign - "$app"
 codesign --verify --strict "$app"
 
+setup="$stage/Notedd Setup.app"
+setup_resources="$setup/Contents/Resources"
+mkdir -p "$setup/Contents/MacOS" "$setup_resources"
+cp macos/installer/Info.plist "$setup/Contents/Info.plist"
+for key in CFBundleShortVersionString CFBundleVersion LSMinimumSystemVersion; do
+    plutil -insert "$key" -string "$(plutil -extract "$key" raw "$app/Contents/Info.plist")" "$setup/Contents/Info.plist"
+done
+cp "$app/Contents/Resources/Notedd.icns" "$setup_resources/"
+cp ../assets/fonts/OFL-Geologica.txt "$setup_resources/"
+ditto -c -k --keepParent "$app" "$setup_resources/Notedd-payload.zip"
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+    cargo build --release --locked --target "$target" --features macos-installer --bin notedd-setup-macos
+done
+lipo -create target/aarch64-apple-darwin/release/notedd-setup-macos target/x86_64-apple-darwin/release/notedd-setup-macos -output "$setup/Contents/MacOS/Notedd Setup"
+codesign --force --sign - "$setup"
+codesign --verify --strict "$setup"
+NOTEDD_SETUP_TEST_DIR="$stage/self-test" "$setup/Contents/MacOS/Notedd Setup" --self-test
+
 rm -rf "$out"
 mkdir -p "$out"
 ditto "$app" "$out/Notedd.app"
 ditto -c -k --keepParent "$app" "$out/notedd-macos.zip"
-printf '%s\n' "$PWD/$out/Notedd.app" "$PWD/$out/notedd-macos.zip"
+ditto "$setup" "$out/Notedd Setup.app"
+ditto -c -k --keepParent "$setup" "$out/notedd-setup-macos.zip"
+printf '%s\n' "$PWD/$out/Notedd.app" "$PWD/$out/notedd-macos.zip" "$PWD/$out/Notedd Setup.app" "$PWD/$out/notedd-setup-macos.zip"

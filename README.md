@@ -1,6 +1,12 @@
-# Notedd
+<div align="center">
+  <img src="assets/notedd.svg" width="96" alt="Notedd icon">
+  <h1>Notedd</h1>
+  <p>A small notes window, always close at hand.</p>
+  <p><b>English</b> · <a href="README.ru.md">Русский</a></p>
+  <p><a href="https://github.com/TheKucel/Notedd/releases">Download</a> · <a href="#shortcuts">Shortcuts</a> · <a href="#building-it">Build from source</a></p>
+</div>
 
-<img src="assets/notedd.svg" width="64" alt="Notedd icon">
+---
 
 I wanted a little notes window I could pull up while doing something else. So that's what this is. Hit `Ctrl+Alt+Space`, write whatever, hit it again to hide it.
 
@@ -72,8 +78,7 @@ cargo build --release --locked --manifest-path app/Cargo.toml
 cargo build --release --locked --manifest-path setup/Cargo.toml
 ```
 
-The installer ends up at `setup	argetelease
-otedd-setup.exe`.
+The installer ends up at `setup/target/release/notedd-setup.exe`.
 
 On macOS, install Xcode or its Command Line Tools, run `rustup target add aarch64-apple-darwin x86_64-apple-darwin`, then `./app/macos/bundle.sh`. It produces `Notedd.app` and `notedd-macos.zip` in `app/target/macos`.
 

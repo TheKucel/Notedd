@@ -50,7 +50,7 @@ fn folder_builder(mut b: PathBuilder, p: &Place, h: f32, tab: (f32, f32), radii:
     let (tl, tr, bl, br) = radii;
     b.move_to(p.pt(0.0, h - bl));
     b.line_to(p.pt(0.0, T + tl)); if tl > 0.05 { arc(&mut b, p, tl, tl, T, true); }
-    b.line_to(p.pt(R + G, T)); arc(&mut b, p, F, x2, T - F, false);
+    b.line_to(p.pt(x2 - F, T)); arc(&mut b, p, F, x2, T - F, false);
     b.line_to(p.pt(x2, RT)); arc(&mut b, p, RT, x2 + RT, 0.0, true);
     b.line_to(p.pt(bx - RT, 0.0)); arc(&mut b, p, RT, bx, RT, true);
     b.line_to(p.pt(bx, T - F)); arc(&mut b, p, F, bx + F, T, false);

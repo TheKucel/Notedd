@@ -16,9 +16,9 @@ use std::sync::{Mutex, Once};
 
 pub use super::other::local_time;
 
-/// the main window (an NSWindow pointer; 0 before it is known)
+/// The AppKit window and the GPUI view that receives native keyboard events.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Win(usize);
+pub struct Win(usize, usize);
 
 /// the height of the screen with the menu bar, which AppKit's coordinates start from
 fn main_height() -> f64 {
@@ -39,7 +39,7 @@ impl Win {
         let RawWindowHandle::AppKit(h) = HasWindowHandle::window_handle(window).ok()?.as_raw() else { return None };
         let view = h.ns_view.as_ptr() as id;
         let w: id = unsafe { msg_send![view, window] };
-        (w != nil).then_some(Win(w as usize))
+        (w != nil).then_some(Win(w as usize, view as usize))
     }
 
     fn w(self) -> id { self.0 as id }
@@ -167,6 +167,11 @@ impl Win {
             // level while Notedd is active, as menu-bar overlays do.
             let _: () = msg_send![self.w(), setLevel: 25isize];
             // A nonactivating panel can take keyboard focus without switching applications or Spaces.
+            let view = self.1 as id;
+            let responder: id = msg_send![self.w(), firstResponder];
+            if responder != view {
+                let _: BOOL = msg_send![self.w(), makeFirstResponder: view];
+            }
             let _: () = msg_send![self.w(), makeKeyAndOrderFront: nil];
         }
     }
@@ -195,6 +200,8 @@ impl Win {
             // Borderless NSPanel, retaining NSWindowStyleMaskNonactivatingPanel.
             let _: () = msg_send![self.w(), setStyleMask: (1usize << 7)];
             let _: () = msg_send![self.w(), setHidesOnDeactivate: NO];
+            let _: () = msg_send![self.w(), setBecomesKeyOnlyIfNeeded: NO];
+            let _: () = msg_send![self.w(), setInitialFirstResponder: self.1 as id];
             // Move to the current Space when activated, including other apps' full-screen Spaces.
             let behavior: usize = (1 << 0) | (1 << 8) | (1 << 18);
             let _: () = msg_send![self.w(), setCollectionBehavior: behavior];
@@ -243,7 +250,7 @@ pub fn left_button_down() -> bool {
 
 // ---- click-through outside the shape
 
-static SHAPE: Mutex<(Win, Option<Vec<Rect>>)> = Mutex::new((Win(0), None));
+static SHAPE: Mutex<(Win, Option<Vec<Rect>>)> = Mutex::new((Win(0, 0), None));
 static IGNORING: AtomicBool = AtomicBool::new(false);
 
 #[repr(C)]

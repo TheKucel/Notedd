@@ -550,7 +550,11 @@ impl Shell {
                 #[cfg(not(target_os = "macos"))]
                 if self.fades() { self.mo.ctl_a = Ease::at(0.); }
                 #[cfg(target_os = "macos")]
-                if self.fades() { self.mo.window_alpha = Ease::at(0.); self.win.set_alpha(0.); }
+                if self.fades() {
+                    // AppKit needs a visible panel when it hands over keyboard focus.
+                    self.mo.window_alpha = Ease::at(0.01);
+                    self.win.set_alpha(0.01);
+                }
             }
             #[cfg(target_os = "macos")]
             { self.mo.window_alpha.to = 1.; }

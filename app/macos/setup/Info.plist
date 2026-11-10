@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Notedd Setup</string>
+    <key>CFBundleExecutable</key>
+    <string>Notedd Setup</string>
+    <key>CFBundleIconFile</key>
+    <string>Notedd</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.thekucel.notedd.setup</string>
+    <key>CFBundleName</key>
+    <string>Notedd Setup</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Notedd Setup creates the folder where Notedd will store notes.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Notedd Setup can create a Finder alias for Notedd on the Desktop.</string>
+</dict>
+</plist>
