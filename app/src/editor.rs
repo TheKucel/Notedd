@@ -19,7 +19,7 @@ actions!(
         Backspace, Delete, Enter, CtrlEnter, Left, Right, Up, Down, SelectLeft, SelectRight, SelectUp, SelectDown,
         WordLeft, WordRight, SelectWordLeft, SelectWordRight, Home, End, SelectHome, SelectEnd, DocStart, DocEnd,
         SelectDocStart, SelectDocEnd, SelectAll, Copy, Cut, Paste, Undo, Redo, Bold, Italic, Strike, Highlight, Code,
-        DeleteWordBack, DeleteLineBack, Cancel,
+        DeleteWordBack, DeleteWordForward, DeleteLineBack, Cancel, PageUp, PageDown, SelectPageUp, SelectPageDown,
     ]
 );
 
@@ -67,6 +67,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-x", Strike, c),
         KeyBinding::new("secondary-e", Code, c),
         KeyBinding::new("ctrl-backspace", DeleteWordBack, c),
+        KeyBinding::new("ctrl-delete", DeleteWordForward, c),
+        KeyBinding::new("pageup", PageUp, c),
+        KeyBinding::new("pagedown", PageDown, c),
+        KeyBinding::new("shift-pageup", SelectPageUp, c),
+        KeyBinding::new("shift-pagedown", SelectPageDown, c),
         KeyBinding::new("escape", Cancel, c),
     ]);
     // the Mac moves by word with Option and to the line or document edge with Cmd
@@ -85,6 +90,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-up", SelectDocStart, c),
         KeyBinding::new("cmd-shift-down", SelectDocEnd, c),
         KeyBinding::new("alt-backspace", DeleteWordBack, c),
+        KeyBinding::new("alt-delete", DeleteWordForward, c),
         KeyBinding::new("cmd-backspace", DeleteLineBack, c),
     ]);
 }
@@ -141,6 +147,8 @@ pub struct Editor {
     goal_x: Option<f32>,
     marked: Option<(usize, Range<usize>)>,
     selecting: bool,
+    /// double/triple click held: the word or line first picked, and the click count; a drag grows by that unit
+    sel_unit: Option<(Pos, Pos, usize)>,
     /// dragging a picture's corner: block, pointer x, width and height at the start, changed yet
     img_drag: Option<(usize, f32, f32, f32, bool)>,
     hover_img: Option<usize>,
@@ -203,7 +211,7 @@ impl Editor {
             origin: Point::default(),
             goal_x: None,
             marked: None,
-            selecting: false, img_drag: None, hover_img: None,
+            selecting: false, sel_unit: None, img_drag: None, hover_img: None,
             reveal: false,
             caret_visible: true,
             blink: None,
@@ -405,11 +413,22 @@ impl Editor {
 
     fn vertical(&mut self, up: bool, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.single { cx.emit(EditorEvent::Nav(if up { -1 } else { 1 })); return; }
+        self.vertical_by(up, extend, false, window, cx);
+    }
+
+    /// PageUp / PageDown: the caret moves a view's height, keeping its column.
+    fn page(&mut self, up: bool, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.single { return; }
+        self.vertical_by(up, extend, true, window, cx);
+    }
+
+    fn vertical_by(&mut self, up: bool, extend: bool, page: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.fresh() { return; }
         let head = self.core.head;
         let (x, y, lh) = self.caret_xy();
         let gx = *self.goal_x.get_or_insert(x);
-        let ty = if up { y - lh * 0.5 } else { y + lh * 1.5 };
+        let step = (f32::from(self.scroll.bounds().size.height) - lh * 2.).max(lh);
+        let ty = match (page, up) { (true, true) => y - step, (true, false) => y + step, (false, true) => y - lh * 0.5, (false, false) => y + lh * 1.5 };
         let mut p = self.layout.pos_at(gx, ty);
         if up && ty < 0. { p = Pos::new(0, 0); }
         if !up && p == head && ty > y { p = self.core.doc.end(); }
@@ -424,15 +443,24 @@ impl Editor {
         self.set_head(p, extend, false, window, cx);
     }
 
-    fn select_word_at(&mut self, p: Pos, window: &mut Window, cx: &mut Context<Self>) {
+    /// the word under `p`, or the whole block for a line (`clicks` >= 3)
+    fn unit_range(&self, p: Pos, clicks: usize) -> Option<(Pos, Pos)> {
         let b = &self.core.doc.blocks[p.block];
-        if b.kind.is_image() { return; }
+        if clicks >= 3 { return Some((Pos::new(p.block, 0), Pos::new(p.block, b.len()))); }
+        if b.kind.is_image() { return None; }
         let text = b.text();
         let (mut a, mut z) = (0, text.len());
         for (i, w) in text.split_word_bound_indices() {
             if p.off >= i && p.off <= i + w.len() { a = i; z = i + w.len(); if p.off < i + w.len() || w.chars().any(char::is_alphanumeric) { break; } }
         }
-        self.core.set_selection(Pos::new(p.block, a), Pos::new(p.block, z));
+        Some((Pos::new(p.block, a), Pos::new(p.block, z)))
+    }
+
+    fn select_unit_at(&mut self, p: Pos, clicks: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((a, z)) = self.unit_range(p, clicks) else { return };
+        self.core.set_selection(a, z);
+        self.sel_unit = Some((a, z, clicks));
+        self.selecting = true;
         self.moved(window, cx);
     }
 
@@ -464,18 +492,14 @@ impl Editor {
             }
         }
         self.marked = None;
+        self.sel_unit = None;
         match ev.click_count {
             1 => {
                 self.selecting = true;
                 if ev.modifiers.shift { self.set_head(p, true, false, window, cx); }
                 else { self.core.set_selection(p, p); self.goal_x = None; self.moved(window, cx); }
             }
-            2 => self.select_word_at(p, window, cx),
-            _ => {
-                let len = self.core.doc.blocks[p.block].len();
-                self.core.set_selection(Pos::new(p.block, 0), Pos::new(p.block, len));
-                self.moved(window, cx);
-            }
+            n => self.select_unit_at(p, n.min(3), window, cx),
         }
     }
 
@@ -499,10 +523,20 @@ impl Editor {
         if !self.selecting || !self.fresh() || ev.pressed_button != Some(MouseButton::Left) { return; }
         let (x, y) = self.to_doc(ev.position);
         let p = self.layout.pos_at(x, y);
+        if let Some((a, z, n)) = self.sel_unit {
+            // grow by whole words (or lines) around the one first picked
+            let Some((ua, uz)) = self.unit_range(p, n) else { return };
+            let (anchor, head) = if p < a { (z, ua) } else if p > z { (a, uz) } else { (a, z) };
+            if (anchor, head) != (self.core.anchor, self.core.head) {
+                self.core.set_selection(anchor, head);
+                self.moved(window, cx);
+            }
+            return;
+        }
         if p != self.core.head { self.set_head(p, true, false, window, cx); }
     }
 
-    fn on_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) { self.selecting = false; self.img_drag = None; }
+    fn on_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) { self.selecting = false; self.sel_unit = None; self.img_drag = None; }
 
     // ---- clipboard --------------------------------------------------------------
 
@@ -813,6 +847,11 @@ impl Render for Editor {
                         .on_action(cx.listener(|e, _: &Backspace, w, cx| { e.marked = None; e.core.backspace(); e.changed(w, cx); }))
             .on_action(cx.listener(|e, _: &Delete, w, cx| { e.core.delete_forward(); e.changed(w, cx); }))
             .on_action(cx.listener(|e, _: &DeleteWordBack, w, cx| { e.core.delete_word_back(); e.changed(w, cx); }))
+            .on_action(cx.listener(|e, _: &DeleteWordForward, w, cx| { e.marked = None; e.core.delete_word_forward(); e.changed(w, cx); }))
+            .on_action(cx.listener(|e, _: &PageUp, w, cx| e.page(true, false, w, cx)))
+            .on_action(cx.listener(|e, _: &PageDown, w, cx| e.page(false, false, w, cx)))
+            .on_action(cx.listener(|e, _: &SelectPageUp, w, cx| e.page(true, true, w, cx)))
+            .on_action(cx.listener(|e, _: &SelectPageDown, w, cx| e.page(false, true, w, cx)))
             .on_action(cx.listener(|e, _: &DeleteLineBack, w, cx| {
                 if e.core.collapsed() {
                     if !e.fresh() { return; }

@@ -322,6 +322,17 @@ impl Core {
         let p = self.delete_range(from, self.head);
         self.anchor = p; self.head = p; self.typing = None;
     }
+    /// Ctrl+Delete: the word after the caret (at the end of a block it behaves like Delete).
+    pub fn delete_word_forward(&mut self) {
+        if !self.collapsed() { self.backspace(); return; }
+        let h = self.head;
+        if self.image(h.block) || h.off >= self.blen(h.block) { self.delete_forward(); return; }
+        let to = self.word_right(h);
+        if to == h { return; }
+        self.checkpoint(EditKind::Other);
+        self.delete_range(h, to);
+        self.anchor = h; self.head = h; self.typing = None;
+    }
     pub fn delete_to_block_start(&mut self) {
         if !self.collapsed() { self.backspace(); return; }
         let h = self.head;
@@ -917,5 +928,39 @@ mod tests {
         at(&mut c, 0, 1);
         c.insert_blocks(blocks);
         assert_eq!(c.markdown(), "T**big**\nhello **big** world");
+    }
+}
+
+#[cfg(test)]
+mod delete_word_forward_tests {
+    use super::*;
+
+    fn at(c: &mut Core, block: usize, off: usize) { c.set_selection(Pos::new(block, off), Pos::new(block, off)); }
+
+    #[test]
+    fn deletes_the_next_word_and_keeps_the_caret() {
+        let mut c = Core::from_markdown("T\nhello brave world");
+        at(&mut c, 1, 0);
+        c.delete_word_forward();
+        assert_eq!(c.doc.blocks[1].text(), "brave world");
+        assert_eq!(c.head, Pos::new(1, 0));
+        c.undo();
+        assert_eq!(c.doc.blocks[1].text(), "hello brave world");
+    }
+
+    #[test]
+    fn at_the_end_of_a_block_it_joins_the_next_one() {
+        let mut c = Core::from_markdown("T\nab\ncd");
+        at(&mut c, 1, 2);
+        c.delete_word_forward();
+        assert_eq!(c.doc.blocks[1].text(), "abcd");
+    }
+
+    #[test]
+    fn deletes_a_selection_like_backspace() {
+        let mut c = Core::from_markdown("T\nhello world");
+        c.set_selection(Pos::new(1, 0), Pos::new(1, 5));
+        c.delete_word_forward();
+        assert_eq!(c.doc.blocks[1].text(), " world");
     }
 }

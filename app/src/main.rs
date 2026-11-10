@@ -114,6 +114,23 @@ fn main() {
                                 window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: p1, modifiers: m, click_count: 1 }), cx);
                                 return;
                             }
+                            // "dbldrag@x0,y0,x1,y1" / "tripledrag@...": double (triple) click at the start, hold, drag to the end
+                            if (kind == "dbldrag" || kind == "tripledrag") && v.len() == 4 {
+                                let (p0, p1, m) = (point(px(v[0]), px(v[1])), point(px(v[2]), px(v[3])), Modifiers::none());
+                                window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: p0, pressed_button: None, modifiers: m }), cx);
+                                let last = if kind == "dbldrag" { 2 } else { 3 };
+                                for n in 1..=last {
+                                    window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: p0, modifiers: m, click_count: n, first_mouse: false }), cx);
+                                    if n < last { window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: p0, modifiers: m, click_count: n }), cx); }
+                                }
+                                for k in 1..=4 {
+                                    let t = k as f32 / 4.;
+                                    let position = point(px(v[0] + (v[2] - v[0]) * t), px(v[1] + (v[3] - v[1]) * t));
+                                    window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: Some(MouseButton::Left), modifiers: m }), cx);
+                                }
+                                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: p1, modifiers: m, click_count: last }), cx);
+                                return;
+                            }
                             if v.len() == 2 {
                                 let position = point(px(v[0]), px(v[1]));
                                 let m = Modifiers::none();
