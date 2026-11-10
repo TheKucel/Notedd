@@ -2,13 +2,13 @@
 
 <img src="assets/notedd.svg" width="64" alt="Notedd icon">
 
-I wanted a little notes window I could pull up on Windows while doing something else. So that's what this is. Hit `Ctrl+Alt+Space`, write whatever, hit it again to hide it.
+I wanted a little notes window I could pull up while doing something else. So that's what this is. Hit `Ctrl+Alt+Space`, write whatever, hit it again to hide it.
 
 `Ctrl+P` opens the stack of notes. Scroll with the wheel or use the arrow keys to move through it. Start typing to search all your notes. If nothing comes up, press Enter to make a note with what you typed. `Ctrl+F` searches the note you're in.
 
-## Running it
+## Windows
 
-Notedd is for Windows 10 and 11 (x64). Download and run `notedd-setup.exe`. [Releases](https://github.com/TheKucel/Notedd/releases)
+Notedd runs on Windows 10 and 11 (x64). Download and run `notedd-setup.exe`. [Releases](https://github.com/TheKucel/Notedd/releases)
 
 The installer puts Notedd in `%LOCALAPPDATA%\Programs\Notedd` by default. You can pick an editor mode, choose where to keep your notes, and decide whether to start with Windows. It runs without admin rights and is unsigned, so Windows may show a warning.
 
@@ -16,21 +16,17 @@ To remove it, use **Settings → Apps** in Windows or run `.\uninstall.exe --uni
 
 ## macOS
 
-Extract `notedd-setup-macos.zip` and open **Notedd Setup** on macOS 13 or later. The installer uses the same stack of cards as on Windows. Choose your theme, editor, global shortcut, and folders before installing. It supports Apple Silicon and Intel Macs and defaults to `~/Applications` on a fresh install. The setup app has an ad hoc signature and no Apple notarization. [Releases](https://github.com/TheKucel/Notedd/releases)
+Extract `notedd-macos.zip` and move `Notedd.app` to Applications. It needs macOS 13 or later and runs on Apple Silicon and Intel Macs. The app has an ad hoc signature and no Apple notarization, so the first time, right-click it and choose **Open**.
 
-Notedd runs without an icon in the Dock or menu bar and opens over the current workspace, including full-screen apps. Press `Control+Option+Space` to show or hide it and `Control+Option+N` to create a note from anywhere. Closing the window leaves it running in the background. You can also open Notedd from Applications to show its window again.
+Notedd lives in the menu bar, with no icon in the Dock. The shortcuts below use `Command` where Windows uses `Ctrl`. Settings go in `~/Library/Application Support/Notedd/settings.txt`.
 
-Click the colored dot or press `Command+Shift+C` to change a note's color. In the stack, right-click a note to open its palette. Click the note tab or press `Command+P` for the stack, press `Command+F` to find in the current note, and press `Command+Shift+M` to switch between Markdown and Simple. Simple hides the markup while you write and displays pasted images in the note. Select text and right-click to format it.
+## Linux
 
-Drag the note tab or the top edge of the folder to move the window. It slows near a screen edge and snaps into place when released close enough. Open Settings with `Command+,`. The **General** tab lets you choose where the window slides from, set the speed, or turn edge snapping off. Notedd follows the macOS Reduce Motion setting.
-
-Notedd uses `~/Documents/Notedd` by default. To open notes from Windows, copy the Markdown files and their `assets` folder together, then use **Settings → General → Notes folder → Choose…** to open the copy.
-
-To build locally, install Xcode or its Command Line Tools and Rust. Run `rustup target add aarch64-apple-darwin x86_64-apple-darwin` and then `./macos/build.sh` from the repository root. The script produces `Notedd.app`, `Notedd Setup.app`, and the release archive `notedd-setup-macos.zip` in `macos/target`. Windows and macOS share the Rust library for Markdown parsing and note storage.
+Extract `notedd-linux-x86_64.tar.gz` and run `notedd`. It needs an X server: on a Wayland desktop Notedd runs through XWayland, so it can move and dock its window. Set `NOTEDD_WAYLAND=1` to run on Wayland itself; the window then stays where the desktop puts it. The tray icon needs AppIndicator support. Settings go in `~/.config/Notedd/settings.txt`.
 
 ## Shortcuts
 
-These bindings are for Windows.
+These bindings are for Windows and Linux. On macOS, `Command` takes the place of `Ctrl` inside the app.
 
 | Keys | What they do |
 | --- | --- |
@@ -53,7 +49,7 @@ You can change the bindings under **Settings → Shortcuts**. Settings also has 
 
 ## Where the notes go
 
-Each note is a Markdown file. The first line is the title. They go in `Documents\Notedd` by default, and you can pick another folder in Settings. App settings live in `%APPDATA%\Notedd\settings.txt`.
+Each note is a Markdown file. The first line is the title. They go in `Documents\Notedd` by default, and you can pick another folder in Settings. On Windows, app settings live in `%APPDATA%\Notedd\settings.txt`.
 
 Headings, lists, quotes, code, links and checkboxes render as you type. Click a checkbox or press `Ctrl+Enter` to tick it. `Ctrl+click` opens a link.
 
@@ -63,20 +59,25 @@ Under **Settings → General → Editor**, pick **Markdown** to see the markup o
 
 You can paste a screenshot or drop an image file into a note. Notedd saves the image in an `assets` folder next to the notes and puts a relative Markdown link in the file. Note colors are stored in the YAML front matter.
 
-Deleted notes go to the Recycle Bin when Windows can put them there. If that fails, Notedd deletes the file directly.
+Deleted notes go to the Recycle Bin (the Trash on macOS and Linux) when the system can put them there. If that fails, Notedd deletes the file directly.
 
 ## Building it
 
-It's a Rust app using Win32, Direct2D and RichEdit. You'll need Rust with the Windows MSVC toolchain. The build uses the Windows SDK's `rc.exe` to embed the icon and version info.
+Notedd is a Rust app built on [GPUI](https://www.gpui.rs/), with local patches in `app/vendor` (see `app/vendor/PATCHES.md`). The editor model is in `editor`, Markdown parsing and note storage in `core`.
 
-Run these from the repo root. The installer needs the app build first because it embeds `notedd.exe`.
+On Windows you'll need Rust with the MSVC toolchain. The build uses the Windows SDK's `rc.exe` to embed the icon and version info. The installer embeds `notedd.exe`, so build the app first:
 
 ```powershell
 cargo build --release --locked --manifest-path app/Cargo.toml
 cargo build --release --locked --manifest-path setup/Cargo.toml
 ```
 
-The installer ends up at `setup\target\release\notedd-setup.exe`.
+The installer ends up at `setup	argetelease
+otedd-setup.exe`.
+
+On macOS, install Xcode or its Command Line Tools, run `rustup target add aarch64-apple-darwin x86_64-apple-darwin`, then `./app/macos/bundle.sh`. It produces `Notedd.app` and `notedd-macos.zip` in `app/target/macos`.
+
+On Linux, install the X11, Wayland, xkbcommon, fontconfig, GTK 3 and AppIndicator development packages (the list is in `.github/workflows/build.yml`), then run `cargo build --release --locked --manifest-path app/Cargo.toml`.
 
 ## License
 

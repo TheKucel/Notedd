@@ -45,7 +45,6 @@ pub const OPEN: Message = Message("Open", "Открыть", "打开");
 pub const MOVE: Message = Message("Move…", "Перенести…", "移动…");
 pub const MOVE_NOTES: Message = Message("Choose where to move your notes", "Куда перенести заметки", "选择笔记的新位置");
 pub const MOVE_FAILED: Message = Message("Couldn't move notes", "Не удалось перенести заметки", "无法移动笔记");
-pub const MOVE_RETRY: Message = Message("Your notes are still in the original folder. Choose another folder or resolve the error and try again.", "Заметки остались в исходной папке. Выберите другую папку или устраните ошибку и повторите попытку.", "笔记仍在原文件夹。请选择其他文件夹，或解决问题后重试。");
 pub const TEXT: Message = Message("Text", "Текст", "文字");
 pub const ACCENT: Message = Message("Accent", "Акцент", "强调色");
 pub const CUSTOM_COLOR: Message = Message("Custom", "Свой", "自定义");

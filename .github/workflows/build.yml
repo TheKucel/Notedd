@@ -5,12 +5,13 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,26 +22,23 @@ jobs:
         with:
           workspaces: |
             app
+            editor
             setup
-
-      - name: Build app
-        working-directory: app
-        run: cargo build --release --locked
 
       - name: Test shared core
         run: cargo test --locked --manifest-path core/Cargo.toml
 
-      - name: Test app
-        working-directory: app
-        run: cargo test --locked
+      - name: Test editor
+        run: cargo test --locked --manifest-path editor/Cargo.toml
+
+      - name: Build app
+        run: cargo build --release --locked --manifest-path app/Cargo.toml
 
       - name: Build installer
-        working-directory: setup
-        run: cargo build --release --locked
+        run: cargo build --release --locked --manifest-path setup/Cargo.toml
 
       - name: Test installer
-        working-directory: setup
-        run: cargo test --locked
+        run: cargo test --locked --manifest-path setup/Cargo.toml
 
       - uses: actions/upload-artifact@v4
         with:
@@ -48,7 +46,7 @@ jobs:
           path: setup/target/release/notedd-setup.exe
           if-no-files-found: error
 
-  build-macos:
+  macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,29 +55,64 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Build universal app and installer
-        run: ./macos/build.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+
+      - name: Build universal Notedd.app
+        run: ./app/macos/bundle.sh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: notedd-setup-macos
-          path: macos/target/notedd-setup-macos.zip
+          name: notedd-macos
+          path: app/target/macos/notedd-macos.zip
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev libfontconfig-dev libfreetype-dev \
+            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+
+      - name: Build app
+        run: cargo build --release --locked --manifest-path app/Cargo.toml
+
+      - name: Pack
+        run: |
+          mkdir -p notedd
+          cp app/target/release/notedd assets/notedd.svg LICENSE notedd/
+          tar -czf notedd-linux-x86_64.tar.gz notedd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notedd-linux
+          path: notedd-linux-x86_64.tar.gz
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, build-macos]
+    needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v5
         with:
-          name: notedd-setup
-
-      - uses: actions/download-artifact@v5
-        with:
-          name: notedd-setup-macos
+          pattern: notedd-*
+          merge-multiple: true
 
       - name: Release
         uses: softprops/action-gh-release@v2
@@ -88,4 +121,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             notedd-setup.exe
-            notedd-setup-macos.zip
+            notedd-macos.zip
+            notedd-linux-x86_64.tar.gz

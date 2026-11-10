@@ -1,50 +1,55 @@
 [package]
 name = "notedd"
-version = "1.2.2"
+version = "2.0.0"
 edition = "2021"
+publish = false
 
 [dependencies]
+notedd-editor = { path = "../editor" }
 notedd-core = { path = "../core" }
-windows-core = "0.58"
+gpui = "0.2.2"
+unicode-segmentation = "1.13"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+smallvec = "1"
+async-channel = "2"
+raw-window-handle = "0.6"
+# tray icon, global shortcuts, Recycle Bin / Trash, user folders: the same code on every system
+tray-icon = "0.26.1"
+global-hotkey = "0.10.0"
+trash = "5.3.0"
+dirs = "6"
 
-[dependencies.windows]
-version = "0.58"
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-registry = "0.5"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# the window layer: AppKit (the same crates GPUI uses), X11 with RandR and SHAPE
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = { version = "0.13", features = ["randr", "shape"] }
+
+# tray-icon on Linux runs on GTK (AppIndicator)
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.61"
 features = [
-    "implement",
-    "Foundation_Numerics",
-    "Win32_Foundation",
-    "Win32_Globalization",
-    "Win32_Graphics_Direct2D",
-    "Win32_Graphics_Direct2D_Common",
-    "Win32_Graphics_DirectWrite",
-    "Win32_Graphics_Dwm",
-    "Win32_System_Registry",
-    "Win32_Graphics_Dxgi_Common",
-    "Win32_Graphics_Gdi",
-    "Win32_Graphics_Imaging",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Com",
-    "Win32_System_DataExchange",
-    "Win32_System_Memory",
-    "Win32_System_Threading",
-    "Win32_Media",
-    "Win32_System_SystemInformation",
-    "Win32_System_Time",
-    "Win32_UI_Shell",
-    "Win32_UI_Controls",
-    "Win32_UI_Controls_RichEdit",
-    "Win32_System_Ole",
-    "Win32_System_SystemServices",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_Variant",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Security", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_LibraryLoader",
+    "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging",
 ]
+
+# GPUI 0.2.2 with local patches (Windows IME fixes among them); see vendor/PATCHES.md.
+# vendor/ comes from Quiet.md (MIT); GPUI itself is Apache-2.0 (vendor/gpui/LICENSE-APACHE).
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
+taffy = { path = "vendor/taffy" }
+xattr = { path = "vendor/xattr" }
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true

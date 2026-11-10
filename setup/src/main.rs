@@ -39,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 static APP_EXE: &[u8] = include_bytes!(env!("NOTEDD_EXE"));
 static FONT: &[u8] = include_bytes!("../../assets/fonts/Geologica.ttf");
 static ICON: &[u8] = include_bytes!("../../assets/notedd.ico");
-const VERSION: &str = "1.2.2";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---- geometry, DIPs ----
 const W: f32 = 640.0;
@@ -265,6 +265,18 @@ fn key_parts(m: u32, vk: u32) -> Vec<String> {
 // ---------- install and uninstall ----------
 /// asks a running Notedd (or the old Pane) to close, so its exe can be replaced or removed
 unsafe fn close_running() {
+    // Notedd 2 hides its window on WM_CLOSE: it quits when this event is set, and holds its mutex until it is gone
+    if let Ok(quit) = OpenEventW(EVENT_MODIFY_STATE, false, w!("Local\\NoteddQuit")) {
+        let _ = SetEvent(quit);
+        let _ = CloseHandle(quit);
+        let t = Instant::now();
+        while t.elapsed().as_secs() < 5 {
+            let Ok(m) = OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!("Local\\NoteddInstance")) else { break };
+            let _ = CloseHandle(m);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    // Notedd 1 and Pane close on WM_CLOSE
     for class in [w!("NoteddFolder"), w!("PaneFolder")] {
         let Ok(h) = FindWindowW(class, None) else { continue };
         if h.0.is_null() { continue; }

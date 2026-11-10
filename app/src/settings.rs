@@ -1,14 +1,12 @@
-//! Preferences: a small key=value file in %APPDATA%\Pane, plus the Windows bits they touch
-//! (start with Windows, the system light/dark choice).
+//! Preferences: the same `settings.txt` the RichEdit app uses, so both versions share it.
 
-use std::path::PathBuf;
 use crate::locale::Language;
-use windows::core::{w, PCWSTR};
-use windows::Win32::System::Registry::*;
+use std::path::PathBuf;
 
 /// key bindings: 0 show/hide (global), 1 new note (global), 2 new note, 3 all notes, 4 find, 5 settings, 6 pin, 7 quit, 8 note colour, 9 delete note, 10 highlight
 pub const KEYS: usize = 11;
 pub const MAX_CARDS: usize = 10;
+/// (MOD_* flags, virtual key): MOD_ALT 1, MOD_CONTROL 2, MOD_SHIFT 4, MOD_WIN 8
 pub const DEFAULT_KEYS: [(u32, u32); KEYS] = [(3, 0x20), (3, 0x4E), (2, 0x4E), (2, 0x50), (2, 0x46), (2, 0xBC), (2, 0x54), (2, 0x51), (6, 0x43), (6, 0x2E), (6, 0x48)];
 /// card colours per theme kind: 0 paper, 1 night, 2 custom
 pub const DEFAULT_CARDS: [[u32; MAX_CARDS]; 3] = [
@@ -26,41 +24,36 @@ pub struct Prefs {
     pub theme: u8,
     /// text size, percent
     pub scale: u32,
-    /// where the window comes from: 0 bottom, 1 right, 2 left, 3 top, 4 in place (fade)
     pub dir: u8,
-    /// slide in from beyond the screen edge instead of a short way
     pub far: bool,
-    /// 0 fast, 1 normal, 2 slow
     pub speed: u8,
-    /// (MOD_* flags, virtual key); vk 0 = no binding
     pub keys: [(u32, u32); KEYS],
-    /// card colours per theme kind (0 paper, 1 night, 2 custom); slot 0 is the theme's paper
     pub cards: [[u32; MAX_CARDS]; 3],
-    /// how many card colours the palette offers
     pub ncards: usize,
-    /// the window stays above other windows
     pub pinned: bool,
-    /// text and accent overrides per theme kind (None = the theme's own)
     pub ink: [Option<u32>; 3],
     pub accent: [Option<u32>; 3],
 }
 
 impl Default for Prefs {
     fn default() -> Prefs {
-        Prefs { language: None, simple_editor: false, theme: 0, scale: 100, dir: 0, far: false, speed: 1, keys: DEFAULT_KEYS, cards: DEFAULT_CARDS, ncards: 6, pinned: false, ink: [None; 3], accent: [None; 3] }
+        Prefs { language: None, simple_editor: true, theme: 0, scale: 100, dir: 0, far: false, speed: 1, keys: DEFAULT_KEYS, cards: DEFAULT_CARDS, ncards: 6, pinned: false, ink: [None; 3], accent: [None; 3] }
     }
 }
 
+/// where Notedd keeps its settings: %APPDATA%, ~/Library/Application Support, ~/.config
+fn config_base() -> PathBuf {
+    // Windows: APPDATA itself, so a test run can point it at a sandbox (and the old app reads the same file)
+    #[cfg(windows)]
+    if let Some(a) = std::env::var_os("APPDATA") { return PathBuf::from(a); }
+    dirs::config_dir().unwrap_or_else(std::env::temp_dir)
+}
+
 fn path() -> PathBuf {
-    let base = std::env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let base = config_base();
     let dir = base.join("Notedd");
-    let file = dir.join("settings.txt");
-    // the app was called Pane before: its settings carry over once
-    if !file.exists() {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::copy(base.join("Pane").join("settings.txt"), &file);
-    }
-    file
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("settings.txt")
 }
 
 /// the folder the notes live in, if one was chosen (installer or settings)
@@ -68,16 +61,13 @@ pub fn notes_dir_pref() -> Option<PathBuf> {
     let s = std::fs::read_to_string(path()).ok()?;
     s.lines().find_map(|l| l.strip_prefix("notes_dir=")).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
+
 pub fn set_notes_dir(dir: &std::path::Path) -> std::io::Result<()> {
     let file = path();
-    let s = match std::fs::read_to_string(&file) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
+    let s = std::fs::read_to_string(&file).unwrap_or_default();
     let mut out: String = s.lines().filter(|l| !l.starts_with("notes_dir=")).map(|l| format!("{l}\n")).collect();
     out += &format!("notes_dir={}\n", dir.display());
-    crate::store::replace_file(&file, out.as_bytes())
+    notedd_core::store::replace_file(&file, out.as_bytes())
 }
 
 pub fn hex(s: &str) -> Option<u32> {
@@ -137,36 +127,86 @@ pub fn save(p: &Prefs) {
     let _ = std::fs::write(path(), s);
 }
 
-const RUN: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+// ---- start with the system ---------------------------------------------------------
+// Windows: the Run key (the value name the old app used too); the Mac: a LaunchAgent;
+// Linux: an XDG autostart entry. All start the app hidden (--background).
 
+fn exe() -> String { std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default() }
+
+#[cfg(windows)]
+const RUN: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+#[cfg(windows)]
 pub fn autostart() -> bool {
-    unsafe {
-        let mut size = 0u32;
-        RegGetValueW(HKEY_CURRENT_USER, RUN, w!("Notedd"), RRF_RT_REG_SZ, None, None, Some(&mut size)).is_ok()
-    }
+    windows_registry::CURRENT_USER.open(RUN).ok().and_then(|k| k.get_string("Notedd").ok()).is_some()
 }
 
+#[cfg(windows)]
 pub fn set_autostart(on: bool) {
-    unsafe {
-        if on {
-            let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            let v: Vec<u16> = format!("\"{exe}\" --background").encode_utf16().chain(Some(0)).collect();
-            let _ = RegSetKeyValueW(HKEY_CURRENT_USER, RUN, w!("Notedd"), REG_SZ.0, Some(v.as_ptr() as _), (v.len() * 2) as u32);
-        } else {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("Notedd"));
-        }
-        // the entry from when the app was called Pane
-        let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("Pane"));
-    }
+    let Ok(key) = windows_registry::CURRENT_USER.create(RUN) else { return };
+    if on { let _ = key.set_string("Notedd", &format!("\"{}\" --background", exe())); } else { let _ = key.remove_value("Notedd"); }
 }
 
-/// Windows app mode: true when apps should be dark
+#[cfg(not(windows))]
+fn autostart_file() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") { dirs::home_dir().map(|h| h.join("Library/LaunchAgents/app.notedd.plist")) }
+    else { dirs::config_dir().map(|c| c.join("autostart/notedd.desktop")) }
+}
+
+#[cfg(not(windows))]
+pub fn autostart() -> bool { autostart_file().is_some_and(|f| f.exists()) }
+
+#[cfg(not(windows))]
+pub fn set_autostart(on: bool) {
+    let Some(f) = autostart_file() else { return };
+    if !on { let _ = std::fs::remove_file(&f); return; }
+    let exe = exe();
+    let text = if cfg!(target_os = "macos") {
+        let esc = exe.replace('&', "&amp;").replace('<', "&lt;");
+        format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+            <plist version=\"1.0\"><dict>\n<key>Label</key><string>app.notedd</string>\n\
+            <key>ProgramArguments</key><array><string>{esc}</string><string>--background</string></array>\n\
+            <key>RunAtLoad</key><true/>\n</dict></plist>\n")
+    } else {
+        format!("[Desktop Entry]\nType=Application\nName=Notedd\nExec=\"{}\" --background\nX-GNOME-Autostart-enabled=true\n", exe.replace('"', "\\\""))
+    };
+    if let Some(d) = f.parent() { let _ = std::fs::create_dir_all(d); }
+    let _ = std::fs::write(&f, text);
+}
+
+// ---- dark mode ---------------------------------------------------------------------
+
+/// what the system said at start (GPUI reads it the same way on every system)
+static SYSTEM_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_system_dark(on: bool) { SYSTEM_DARK.store(on, std::sync::atomic::Ordering::Relaxed); }
+
+/// true when apps should be dark
 pub fn system_dark() -> bool {
-    unsafe {
-        let mut v = 1u32;
-        let mut size = 4u32;
-        let ok = RegGetValueW(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-            w!("AppsUseLightTheme"), RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as _), Some(&mut size)).is_ok();
-        ok && v == 0
-    }
+    // Windows: read live, so the switch in Settings is picked up without a restart
+    #[cfg(windows)]
+    if let Some(v) = windows_registry::CURRENT_USER
+        .open("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize").ok()
+        .and_then(|k| k.get_u32("AppsUseLightTheme").ok()) { return v == 0; }
+    SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// the chosen notes folder, or Documents\Notedd (Documents\Pane if the notes are still there from before the rename)
+pub fn notes_dir() -> PathBuf {
+    if let Some(d) = notes_dir_pref() { let _ = std::fs::create_dir_all(&d); return d; }
+    let docs = dirs_documents();
+    let (new, old) = (docs.join("Notedd"), docs.join("Pane"));
+    let dir = if !new.exists() && old.exists() { old } else { new };
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn dirs_documents() -> PathBuf {
+    dirs::document_dir().or_else(|| dirs::home_dir().map(|h| h.join("Documents"))).unwrap_or_else(std::env::temp_dir)
+}
+
+/// a note the user deletes goes to the Recycle Bin / Trash; where there is none the file is removed
+pub fn trash(dir: &std::path::Path, id: &str) {
+    let path = dir.join(format!("{id}.md"));
+    if !path.exists() { return; }
+    if trash::delete(&path).is_err() || path.exists() { let _ = std::fs::remove_file(&path); }
 }
