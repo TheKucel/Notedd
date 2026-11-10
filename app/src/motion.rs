@@ -138,7 +138,8 @@ impl Shell {
         }
     }
 
-    fn dpi(&self, window: &Window) -> f32 { window.scale_factor() }
+    /// screen units (what `platform` counts in) per logical pixel
+    fn dpi(&self, window: &Window) -> f32 { platform::px_scale(window) }
 
     pub fn work_area(&self) -> Rect { self.win.work_area() }
     fn monitor_rect(&self) -> Rect { self.win.monitor_rect() }

@@ -42,6 +42,9 @@ impl Win {
 #[allow(dead_code)]
 pub fn left_button_down() -> bool { false }
 
+/// what one logical pixel of the window is in this layer's units: physical pixels
+pub fn px_scale(window: &gpui::Window) -> f32 { window.scale_factor() }
+
 /// a FILETIME (100 ns ticks since 1601, UTC) on the local clock
 pub fn local_time(ft: u64) -> LocalTime {
     use chrono::{Datelike, TimeZone, Timelike};

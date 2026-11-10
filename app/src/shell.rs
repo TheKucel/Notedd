@@ -613,7 +613,7 @@ impl Shell {
         let Some((hit, (px0, py0), (l0, t0, r0, b0))) = self.rsz else { return };
         let p = self.win.cursor_pos();
         let (dx, dy) = (p.x - px0, p.y - py0);
-        let sc = window.scale_factor();
+        let sc = platform::px_scale(window);
         let (minw, minh) = ((522. * sc) as i32, (330. * sc) as i32);
         let (mut l, mut t, mut r, mut b) = (l0, t0, r0, b0);
         if matches!(hit, 10 | 13 | 16) { l = (l0 + dx).min(r0 - minw); }

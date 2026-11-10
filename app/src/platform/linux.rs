@@ -13,7 +13,7 @@ use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-pub use super::other::local_time;
+pub use super::other::{local_time, px_scale};
 
 x11rb::atom_manager! {
     Atoms: AtomsCookie {

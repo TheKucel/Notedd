@@ -47,16 +47,23 @@ impl Language {
         Self::from_ui_language(unsafe { GetUserDefaultUILanguage() })
     }
 
-    /// LC_ALL / LC_MESSAGES / LANG ("ru_RU.UTF-8"); apps started from the Finder have none, so the Mac asks `defaults`
+    /// the Mac: the first of the preferred languages (System Settings), whatever the shell's LANG says;
+    /// elsewhere LANGUAGE ("ru:en") / LC_ALL / LC_MESSAGES / LANG ("ru_RU.UTF-8")
     #[cfg(not(windows))]
     pub fn system() -> Self {
-        let env = ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter().filter_map(|k| std::env::var(k).ok()).find(|v| !v.is_empty() && v != "C" && v != "POSIX");
         #[cfg(target_os = "macos")]
-        let env = env.or_else(|| {
-            let out = std::process::Command::new("defaults").args(["read", "-g", "AppleLocale"]).output().ok()?;
-            Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let lang = (|| {
+            // `(\n    "ru-RU",\n    "en-US"\n)`
+            let out = std::process::Command::new("defaults").args(["read", "-g", "AppleLanguages"]).output().ok()?;
+            let s = String::from_utf8_lossy(&out.stdout).into_owned();
+            s.split(|c: char| c == '(' || c == ',' || c == ')').map(|v| v.trim().trim_matches('"').to_string()).find(|v| !v.is_empty())
+        })();
+        #[cfg(not(target_os = "macos"))]
+        let lang: Option<String> = None;
+        let lang = lang.or_else(|| {
+            ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"].into_iter().filter_map(|k| std::env::var(k).ok()).find(|v| !v.is_empty() && v != "C" && v != "POSIX")
         });
-        match env.as_deref().map(|v| v.get(..2).unwrap_or("")) {
+        match lang.as_deref().map(|v| v.get(..2).unwrap_or("")) {
             Some("ru") => Self::Russian,
             Some("zh") => Self::Chinese,
             _ => Self::English,

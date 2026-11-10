@@ -1,6 +1,7 @@
 //! The main window and the screen, behind one interface: Win32 on Windows, AppKit on the Mac, X11 on
 //! Linux (Wayland does not let a window place itself; the app asks for XWayland, see `main.rs`).
-//! Everything is in physical screen pixels; the window's rectangle is its client area (what the
+//! Everything is in screen units, `px_scale(window)` of them per logical pixel: physical pixels on
+//! Windows and X11, points on the Mac (see `macos.rs`); the window's rectangle is its client area (what the
 //! folders are drawn in), never the invisible resize frame around it.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

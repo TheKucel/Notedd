@@ -150,6 +150,9 @@ fn icon(size: i32) -> Option<HICON> {
     unsafe { CreateIconFromResourceEx(&ICO[off..off + len], true, 0x30000, w, w, LR_DEFAULTCOLOR).ok() }
 }
 
+/// what one logical pixel of the window is in this layer's units: physical pixels
+pub fn px_scale(window: &gpui::Window) -> f32 { window.scale_factor() }
+
 /// the left mouse button is held, wherever the pointer is
 pub fn left_button_down() -> bool { unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 != 0 } }
 

@@ -1,8 +1,10 @@
 //! AppKit: the window is an NSWindow, moved and sized with `setFrame:`. AppKit counts in points from the
-//! bottom-left corner of the main screen; the rest of the app counts in pixels from the top-left, so every
-//! rectangle is flipped against the main screen's height and scaled by the window's backing scale.
+//! bottom-left corner of the main screen; this layer hands out points from the top-left, so every rectangle
+//! is flipped against the main screen's height. Points, not pixels: screens of different density share one
+//! space of points but none of pixels, so a window dragged from a Retina screen to a plain one would jump
+//! (`px_scale` is 1 here: the app's "pixels" are points on the Mac).
 //! A window region does not exist here: `set_shape` makes the window ignore the mouse while the pointer
-//! is outside the given parts, checked on the main queue every 30 ms.
+//! is outside the given parts, checked on the main queue every 30 ms while the window is shown with a shape.
 
 #![allow(deprecated)] // cocoa 0.26 marks itself deprecated in favour of objc2; GPUI 0.2 still uses it
 
@@ -12,7 +14,8 @@ use cocoa::foundation::{NSPoint, NSRect, NSSize};
 use objc::{class, msg_send, sel, sel_impl};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, Once};
+use std::sync::{Mutex, OnceLock};
+use std::thread::Thread;
 
 pub use super::other::local_time;
 
@@ -33,6 +36,9 @@ fn main_height() -> f64 {
     }
 }
 
+/// what one logical pixel of the window is in this layer's units: points, so 1
+pub fn px_scale(_window: &gpui::Window) -> f32 { 1. }
+
 impl Win {
     pub fn of(window: &gpui::Window) -> Option<Win> {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -44,22 +50,14 @@ impl Win {
 
     fn w(self) -> id { self.0 as id }
 
-    fn scale(self) -> f64 {
-        if self.0 == 0 { return 1.; }
-        let s: f64 = unsafe { msg_send![self.w(), backingScaleFactor] };
-        if s > 0. { s } else { 1. }
-    }
-
     fn to_px(self, r: NSRect) -> Rect {
-        let s = self.scale();
         let top = main_height() - (r.origin.y + r.size.height);
-        let p = |v: f64| (v * s).round() as i32;
+        let p = |v: f64| v.round() as i32;
         Rect { left: p(r.origin.x), top: p(top), right: p(r.origin.x + r.size.width), bottom: p(top + r.size.height) }
     }
 
     fn from_px(self, r: Rect) -> NSRect {
-        let s = self.scale();
-        let (x, y, w, h) = (r.left as f64 / s, r.top as f64 / s, r.w() as f64 / s, r.h() as f64 / s);
+        let (x, y, w, h) = (r.left as f64, r.top as f64, r.w() as f64, r.h() as f64);
         NSRect::new(NSPoint::new(x, main_height() - y - h), NSSize::new(w, h))
     }
 
@@ -132,14 +130,8 @@ impl Win {
     /// What lies outside them is transparent anyway; AppKit just would not let clicks through it.
     pub fn set_shape(self, parts: Option<&[Rect]>) {
         if self.0 == 0 { return; }
-        *SHAPE.lock().unwrap() = (self, parts.filter(|p| !p.is_empty()).map(|p| p.to_vec()));
-        static POLL: Once = Once::new();
-        POLL.call_once(|| {
-            std::thread::spawn(|| loop {
-                std::thread::sleep(std::time::Duration::from_millis(30));
-                unsafe { dispatch_async_f(&_dispatch_main_q, std::ptr::null_mut(), check_shape) };
-            });
-        });
+        *SHAPE.lock().unwrap_or_else(|e| e.into_inner()) = (self, parts.filter(|p| !p.is_empty()).map(|p| p.to_vec()));
+        refresh_shape();
     }
 
     pub fn visible(self) -> bool {
@@ -153,6 +145,7 @@ impl Win {
     pub fn hide(self) {
         if self.0 == 0 { return; }
         unsafe { let _: () = msg_send![self.w(), orderOut: nil]; }
+        refresh_shape();
     }
     pub fn set_alpha(self, alpha: f32) {
         if self.0 == 0 { return; }
@@ -174,6 +167,7 @@ impl Win {
             }
             let _: () = msg_send![self.w(), makeKeyAndOrderFront: nil];
         }
+        refresh_shape();
     }
     /// the window has the keyboard
     pub fn foreground(self) -> bool {
@@ -236,22 +230,23 @@ impl Win {
 
     /// the pointer on the screen
     pub fn cursor_pos(self) -> Pt {
-        let s = self.scale();
         let p: NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
-        Pt { x: (p.x * s).round() as i32, y: ((main_height() - p.y) * s).round() as i32 }
+        Pt { x: p.x.round() as i32, y: (main_height() - p.y).round() as i32 }
     }
 }
 
+fn pressed_buttons() -> usize { unsafe { msg_send![class!(NSEvent), pressedMouseButtons] } }
+
 /// the left mouse button is held, wherever the pointer is
-pub fn left_button_down() -> bool {
-    let b: usize = unsafe { msg_send![class!(NSEvent), pressedMouseButtons] };
-    b & 1 != 0
-}
+pub fn left_button_down() -> bool { pressed_buttons() & 1 != 0 }
 
 // ---- click-through outside the shape
 
 static SHAPE: Mutex<(Win, Option<Vec<Rect>>)> = Mutex::new((Win(0, 0), None));
 static IGNORING: AtomicBool = AtomicBool::new(false);
+/// the window is shown with a shape: the poller runs (otherwise it sleeps until woken)
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+static POLLER: OnceLock<Thread> = OnceLock::new();
 
 #[repr(C)]
 struct DispatchQueue { _p: [u8; 0] }
@@ -260,9 +255,32 @@ extern "C" {
     fn dispatch_async_f(queue: *const DispatchQueue, context: *mut c_void, work: extern "C" fn(*mut c_void));
 }
 
+fn shape() -> (Win, Option<Vec<Rect>>) { SHAPE.lock().unwrap_or_else(|e| e.into_inner()).clone() }
+
+/// on the main thread, after the shape or the visibility changes: polling runs only while it matters
+fn refresh_shape() {
+    let (w, parts) = shape();
+    let on = w.0 != 0 && parts.is_some() && w.visible();
+    ACTIVE.store(on, Ordering::Relaxed);
+    if on {
+        POLLER
+            .get_or_init(|| {
+                std::thread::spawn(|| loop {
+                    if !ACTIVE.load(Ordering::Relaxed) { std::thread::park(); continue; }
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    unsafe { dispatch_async_f(&_dispatch_main_q, std::ptr::null_mut(), check_shape) };
+                })
+                .thread()
+                .clone()
+            })
+            .unpark();
+    }
+    check_shape(std::ptr::null_mut());
+}
+
 /// on the main queue: the window takes the mouse only while the pointer is over one of the parts
 extern "C" fn check_shape(_: *mut c_void) {
-    let (w, parts) = SHAPE.lock().unwrap().clone();
+    let (w, parts) = shape();
     if w.0 == 0 { return; }
     let ignore = match &parts {
         Some(parts) if w.visible() => {
@@ -272,6 +290,9 @@ extern "C" fn check_shape(_: *mut c_void) {
         }
         _ => false,
     };
+    // a button held over the window (a drag or a sizing going on): AppKit would stop sending it the
+    // moment the window starts ignoring the mouse, so letting clicks through waits for the release
+    if ignore && !IGNORING.load(Ordering::Relaxed) && pressed_buttons() != 0 { return; }
     if IGNORING.swap(ignore, Ordering::Relaxed) == ignore { return; }
     let v: BOOL = if ignore { YES } else { NO };
     unsafe { let _: () = msg_send![w.w(), setIgnoresMouseEvents: v]; }
