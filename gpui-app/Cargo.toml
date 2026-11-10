@@ -25,6 +25,14 @@ windows-registry = "0.5"
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
+# the window layer: AppKit (the same crates GPUI uses), X11 with RandR and SHAPE
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = { version = "0.13", features = ["randr", "shape"] }
+
 # tray-icon on Linux runs on GTK (AppIndicator)
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

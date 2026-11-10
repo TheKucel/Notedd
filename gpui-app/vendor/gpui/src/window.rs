@@ -1070,6 +1070,16 @@ impl Window {
                     || (active.get()
                         && last_input_timestamp.get().elapsed() < Duration::from_secs(1));
 
+                // notedd: a resize reported while the app was busy (the app sized the window itself, so
+                // the resize callback could not get in) is caught up before the frame
+                handle
+                    .update(&mut cx, |_, window, cx| {
+                        if window.platform_window.content_size() != window.viewport_size {
+                            window.bounds_changed(cx);
+                        }
+                    })
+                    .log_err();
+
                 if invalidator.is_dirty() || request_frame_options.force_render {
                     measure("frame duration", || {
                         handle

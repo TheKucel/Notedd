@@ -1,6 +1,6 @@
-//! Stand-in for the systems that have no window layer yet (the Mac, Linux). It keeps the app building
-//! and running in a plain way: the window stays where the system put it, the numbers the motion code
-//! asks for are remembered rather than applied. Replaced by `macos.rs` / `linux.rs`.
+//! Stand-in where the app cannot place its own window (Wayland without XWayland): the window stays
+//! where the system put it, the numbers the motion code asks for are remembered rather than applied.
+//! Also the local clock for every system but Windows.
 
 use super::{LocalTime, Pt, Rect};
 use std::cell::Cell;
@@ -36,9 +36,10 @@ impl Win {
     pub fn foreground(self) -> bool { self.visible() }
     pub fn set_topmost(self, _on: bool) {}
     pub fn prepare(self) {}
+    pub fn cursor_pos(self) -> Pt { Pt::default() }
 }
 
-pub fn cursor_pos() -> Pt { Pt::default() }
+#[allow(dead_code)]
 pub fn left_button_down() -> bool { false }
 
 /// a FILETIME (100 ns ticks since 1601, UTC) on the local clock

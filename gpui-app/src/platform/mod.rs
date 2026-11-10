@@ -1,5 +1,5 @@
-//! The main window and the screen, behind one interface: Win32 on Windows. The Mac and Linux get a
-//! stand-in for now, so the app builds there; each will get its own file next to `windows.rs`.
+//! The main window and the screen, behind one interface: Win32 on Windows, AppKit on the Mac, X11 on
+//! Linux (Wayland does not let a window place itself; the app asks for XWayland, see `main.rs`).
 //! Everything is in physical screen pixels; the window's rectangle is its client area (what the
 //! folders are drawn in), never the invisible resize frame around it.
 
@@ -24,6 +24,15 @@ mod windows;
 pub use self::windows::*;
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 mod other;
-#[cfg(not(windows))]
-pub use self::other::*;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use self::macos::*;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use self::linux::*;

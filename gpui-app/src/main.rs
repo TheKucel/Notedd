@@ -19,6 +19,12 @@ use gpui::*;
 static FONT: &[u8] = include_bytes!("../../assets/fonts/Geologica.ttf");
 
 fn main() {
+    // Wayland does not let a window place itself, and the folder moves, docks and slides on its own:
+    // with an X server around (XWayland too), GPUI is sent there. NOTEDD_WAYLAND=1 keeps Wayland.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && std::env::var_os("NOTEDD_WAYLAND").is_none() {
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
     // The release build has no console: panics go to a log file.
     let log = std::env::temp_dir().join("notedd-gpui.log");
     std::panic::set_hook(Box::new(move |info| {

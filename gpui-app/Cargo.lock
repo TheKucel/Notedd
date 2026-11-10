@@ -3748,6 +3748,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
  "chrono",
+ "cocoa 0.26.0",
  "dirs 6.0.0",
  "global-hotkey",
  "gpui",
@@ -3755,6 +3756,7 @@ dependencies = [
  "image",
  "notedd-core",
  "notedd-editor",
+ "objc",
  "raw-window-handle",
  "smallvec",
  "trash",
@@ -3762,6 +3764,7 @@ dependencies = [
  "unicode-segmentation",
  "windows 0.61.3",
  "windows-registry 0.5.3",
+ "x11rb",
 ]
 
 [[package]]

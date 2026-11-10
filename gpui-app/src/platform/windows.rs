@@ -107,6 +107,13 @@ impl Win {
         unsafe { let _ = SetWindowPos(self.h(), Some(if on { HWND_TOPMOST } else { HWND_NOTOPMOST }), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
     }
 
+    /// the pointer on the screen
+    pub fn cursor_pos(self) -> Pt {
+        let mut p = POINT::default();
+        unsafe { let _ = GetCursorPos(&mut p); }
+        Pt { x: p.x, y: p.y }
+    }
+
     /// once, after the window opens: the app icon; no frame, no shadow, square corners, no taskbar button
     pub fn prepare(self) {
         use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
@@ -141,13 +148,6 @@ fn icon(size: i32) -> Option<HICON> {
     }
     let (w, off, len) = best?;
     unsafe { CreateIconFromResourceEx(&ICO[off..off + len], true, 0x30000, w, w, LR_DEFAULTCOLOR).ok() }
-}
-
-/// the pointer on the screen
-pub fn cursor_pos() -> Pt {
-    let mut p = POINT::default();
-    unsafe { let _ = GetCursorPos(&mut p); }
-    Pt { x: p.x, y: p.y }
 }
 
 /// the left mouse button is held, wherever the pointer is

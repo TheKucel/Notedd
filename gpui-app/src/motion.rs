@@ -580,7 +580,7 @@ impl Shell {
     /// a press on the tab: drag the window with the magnet, or a plain click opens the drawer
     pub fn start_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.mo.drag.is_some() { return; }
-        let c0 = platform::cursor_pos();
+        let c0 = self.win.cursor_pos();
         let r0 = self.win_rect();
         self.mo.drag = Some(Drag { c0, r0, moved: false });
         self.palette = false;
@@ -598,7 +598,7 @@ impl Shell {
     fn drag_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(d) = &self.mo.drag else { return };
         let (c0, r0) = (d.c0, d.r0);
-        let c = platform::cursor_pos();
+        let c = self.win.cursor_pos();
         let (dx, dy) = (c.x - c0.x, c.y - c0.y);
         if dx.abs() + dy.abs() > 3 { if let Some(d) = &mut self.mo.drag { d.moved = true; } }
         let moved = self.mo.drag.as_ref().is_some_and(|d| d.moved);

@@ -589,14 +589,14 @@ impl Shell {
     /// starts sizing from one edge: the window follows the pointer until the button goes up
     fn begin_resize(&mut self, hit: usize) {
         if !matches!(hit, 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) { return; }
-        let (p, r) = (platform::cursor_pos(), self.win.client_rect());
+        let (p, r) = (self.win.cursor_pos(), self.win.client_rect());
         dbg_log(&format!("begin_resize hit={hit} cur={},{} win={},{},{},{}", p.x, p.y, r.left, r.top, r.right, r.bottom));
         self.rsz = Some((hit, (p.x, p.y), (r.left, r.top, r.right, r.bottom)));
     }
 
     fn drag_resize(&mut self, window: &Window) {
         let Some((hit, (px0, py0), (l0, t0, r0, b0))) = self.rsz else { return };
-        let p = platform::cursor_pos();
+        let p = self.win.cursor_pos();
         let (dx, dy) = (p.x - px0, p.y - py0);
         let sc = window.scale_factor();
         let (minw, minh) = ((522. * sc) as i32, (330. * sc) as i32);

@@ -312,8 +312,12 @@ impl rwh::HasDisplayHandle for RawWindow {
 }
 
 impl rwh::HasWindowHandle for X11Window {
+    // notedd: the app moves and shapes its window itself, so it needs the X window id
     fn window_handle(&self) -> Result<rwh::WindowHandle<'_>, rwh::HandleError> {
-        unimplemented!()
+        let Some(id) = NonZeroU32::new(self.0.x_window) else {
+            return Err(rwh::HandleError::Unavailable);
+        };
+        Ok(unsafe { rwh::WindowHandle::borrow_raw(rwh::XcbWindowHandle::new(id).into()) })
     }
 }
 impl rwh::HasDisplayHandle for X11Window {
