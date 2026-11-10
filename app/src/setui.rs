@@ -86,10 +86,10 @@ pub struct SetDraw {
 
 fn key_parts(m: u32, vk: u32) -> Vec<String> {
     let mut v = vec![];
-    if m & 2 != 0 { v.push("Ctrl".to_string()); }
-    if m & 1 != 0 { v.push("Alt".to_string()); }
-    if m & 4 != 0 { v.push("Shift".to_string()); }
-    if m & 8 != 0 { v.push("Win".to_string()); }
+    if m & 2 != 0 { v.push(if cfg!(target_os = "macos") { "⌃" } else { "Ctrl" }.to_string()); }
+    if m & 1 != 0 { v.push(if cfg!(target_os = "macos") { "⌥" } else { "Alt" }.to_string()); }
+    if m & 4 != 0 { v.push(if cfg!(target_os = "macos") { "⇧" } else { "Shift" }.to_string()); }
+    if m & 8 != 0 { v.push(if cfg!(target_os = "macos") { "⌘" } else if cfg!(windows) { "Win" } else { "Super" }.to_string()); }
     if vk != 0 { v.push(system::label(0, vk)); }
     v
 }
@@ -600,7 +600,7 @@ impl Shell {
                 else if glyph == 1 { p.ncards -= 1; if self.st.pick == Some(Pick::Card(p.ncards)) { self.st.pick = None; } }
             }
             Row::Notes => {
-                if i == 0 { let _ = std::process::Command::new("explorer").arg(&self.dir).spawn(); } else { self.move_folder(window, cx); }
+                if i == 0 { crate::system::open_folder(&self.dir); } else { self.move_folder(window, cx); }
                 return;
             }
             Row::Reset => { p.cards[k] = DEFAULT_CARDS[k]; p.ink[k] = None; p.accent[k] = None; self.st.pick = None; }
@@ -614,6 +614,8 @@ impl Shell {
     /// keyboard in the settings: arrows and Tab move, Enter or Space presses, Ctrl+Tab turns the page
     pub fn settings_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let m = &ev.keystroke.modifiers;
+        // Command shortcuts belong to the application, not settings navigation.
+        if m.platform { return false; }
         let (ctrl, shift) = (m.control, m.shift);
         let key = ev.keystroke.key.as_str();
         let w = f32::from(window.viewport_size().width) - 2.;

@@ -8,6 +8,8 @@ pub const KEYS: usize = 11;
 pub const MAX_CARDS: usize = 10;
 /// (MOD_* flags, virtual key): MOD_ALT 1, MOD_CONTROL 2, MOD_SHIFT 4, MOD_WIN 8
 pub const DEFAULT_KEYS: [(u32, u32); KEYS] = [(3, 0x20), (3, 0x4E), (2, 0x4E), (2, 0x50), (2, 0x46), (2, 0xBC), (2, 0x54), (2, 0x51), (6, 0x43), (6, 0x2E), (6, 0x48)];
+#[cfg(target_os = "macos")]
+const MAC_KEYS: [(u32, u32); KEYS] = [(3, 0x20), (3, 0x4E), (8, 0x4E), (8, 0x50), (8, 0x46), (8, 0xBC), (8, 0x54), (8, 0x51), (12, 0x43), (12, 0x2E), (12, 0x48)];
 /// card colours per theme kind: 0 paper, 1 night, 2 custom
 pub const DEFAULT_CARDS: [[u32; MAX_CARDS]; 3] = [
     [0xefebe3, 0xdde3d2, 0xd8e0e2, 0xe2dbe8, 0xefdcd4, 0xeee1c5, 0xd9e4ea, 0xe6e6dc, 0xe9dde3, 0xe0e7dc],
@@ -37,8 +39,15 @@ pub struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Prefs {
-        Prefs { language: None, simple_editor: true, theme: 0, scale: 100, dir: 0, far: false, speed: 1, keys: DEFAULT_KEYS, cards: DEFAULT_CARDS, ncards: 6, pinned: false, ink: [None; 3], accent: [None; 3] }
+        Prefs { language: None, simple_editor: true, theme: 0, scale: 100, dir: 0, far: false, speed: 1, keys: if cfg!(target_os = "macos") { mac_default_keys() } else { DEFAULT_KEYS }, cards: DEFAULT_CARDS, ncards: 6, pinned: false, ink: [None; 3], accent: [None; 3] }
     }
+}
+
+fn mac_default_keys() -> [(u32, u32); KEYS] {
+    #[cfg(target_os = "macos")]
+    { MAC_KEYS }
+    #[cfg(not(target_os = "macos"))]
+    { DEFAULT_KEYS }
 }
 
 /// where Notedd keeps its settings: %APPDATA%, ~/Library/Application Support, ~/.config
@@ -109,6 +118,11 @@ pub fn load() -> Prefs {
             }
         }
     }
+    // Older Mac builds saved the Windows defaults. Keep customized shortcuts intact.
+    #[cfg(target_os = "macos")]
+    if !s.lines().any(|line| line.trim() == "mac_keys=1") {
+        for i in 2..KEYS { if p.keys[i] == DEFAULT_KEYS[i] { p.keys[i] = MAC_KEYS[i]; } }
+    }
     p
 }
 
@@ -116,6 +130,8 @@ pub fn save(p: &Prefs) {
     let language = p.language.map_or("system", Language::tag);
     let editor = if p.simple_editor { "simple" } else { "markdown" };
     let mut s = format!("language={language}\neditor={editor}\ntheme={}\nscale={}\ndir={}\nfar={}\nspeed={}\n", p.theme, p.scale, p.dir, p.far as u8, p.speed);
+    #[cfg(target_os = "macos")]
+    { s += "mac_keys=1\n"; }
     for (i, (m, vk)) in p.keys.iter().enumerate() { s += &format!("key{i}={m},{vk}\n"); }
     s += &format!("ncards={}\npinned={}\n", p.ncards, p.pinned as u8);
     let h = |c: Option<u32>| c.map(|c| format!("{c:06x}")).unwrap_or_default();

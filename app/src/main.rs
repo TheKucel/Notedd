@@ -15,7 +15,15 @@ mod theme;
 
 use gpui::*;
 
+#[cfg(not(target_os = "macos"))]
 static FONT: &[u8] = include_bytes!("../../assets/fonts/Geologica.ttf");
+#[cfg(target_os = "macos")]
+static FONTS: &[&[u8]] = &[
+    include_bytes!("../../assets/fonts/Geologica-Regular.ttf"),
+    include_bytes!("../../assets/fonts/Geologica-Medium.ttf"),
+    include_bytes!("../../assets/fonts/Geologica-SemiBold.ttf"),
+    include_bytes!("../../assets/fonts/Geologica-Bold.ttf"),
+];
 
 fn main() {
     // Wayland does not let a window place itself, and the folder moves, docks and slides on its own:
@@ -39,10 +47,16 @@ fn main() {
         // the tray and the global shortcuts live on the main thread, in the app's event loop
         system::start([prefs.keys[0], prefs.keys[1]], tx);
         settings::set_system_dark(matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark));
-        let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(FONT)]);
+        #[cfg(not(target_os = "macos"))]
+        let fonts = vec![std::borrow::Cow::Borrowed(FONT)];
+        #[cfg(target_os = "macos")]
+        let fonts = FONTS.iter().map(|font| std::borrow::Cow::Borrowed(*font)).collect();
+        let _ = cx.text_system().add_fonts(fonts);
         let bounds = Bounds::centered(None, size(px(882.), px(586.)), cx);
         let handle = cx.open_window(
             WindowOptions {
+                #[cfg(target_os = "macos")]
+                kind: WindowKind::PopUp,
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: None,
                 window_background: WindowBackgroundAppearance::Transparent,

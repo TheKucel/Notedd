@@ -17,6 +17,11 @@ static ICO: &[u8] = include_bytes!("../../assets/notedd.ico");
 
 fn send(c: Cmd) { if let Some(tx) = TX.get() { let _ = tx.try_send(c); } }
 
+pub fn open_folder(path: &std::path::Path) {
+    let program = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
+    let _ = std::process::Command::new(program).arg(path).spawn();
+}
+
 // ---- single instance ---------------------------------------------------------
 
 /// true when this is the first instance; a second one wakes the first and gets false
@@ -223,9 +228,38 @@ pub fn key_to_vk(key: &str) -> Option<u32> {
     }
 }
 
+// GPUI represents Shift+punctuation on macOS as the resulting character, without
+// the Shift modifier. Store the underlying key and Shift for the settings UI and
+// global hotkey registration, then reverse the mapping for local GPUI bindings.
+#[cfg(target_os = "macos")]
+const SHIFTED_KEYS: &[(u32, &str)] = &[
+    (0xDE, "\""), (0xBA, ":"), (0xBC, "<"), (0xBE, ">"),
+    (0xBD, "_"), (0xBB, "+"), (0xBF, "?"), (0xC0, "~"),
+    (0xDB, "{"), (0xDD, "}"), (0xDC, "|"),
+    (0x31, "!"), (0x32, "@"), (0x33, "#"), (0x34, "$"), (0x35, "%"),
+    (0x36, "^"), (0x37, "&"), (0x38, "*"), (0x39, "("), (0x30, ")"),
+];
+
+pub fn shortcut_key(key: &str, mods: u32) -> Option<(u32, u32)> {
+    #[cfg(target_os = "macos")]
+    if let Some(&(vk, _)) = SHIFTED_KEYS.iter().find(|(_, shifted)| *shifted == key) {
+        return Some((mods | 4, vk));
+    }
+    key_to_vk(key).map(|vk| (mods, vk))
+}
+
 /// gpui binding string such as "ctrl-alt-n"
 pub fn binding(mods: u32, vk: u32) -> Option<String> {
-    let key = vk_to_key(vk)?;
+    let mut key = vk_to_key(vk)?;
+    #[allow(unused_mut)]
+    let mut mods = mods;
+    #[cfg(target_os = "macos")]
+    if mods & 4 != 0 {
+        if let Some((_, shifted)) = SHIFTED_KEYS.iter().find(|(code, _)| *code == vk) {
+            key = (*shifted).to_string();
+            mods &= !4;
+        }
+    }
     let mut s = String::new();
     if mods & 2 != 0 { s += "ctrl-"; }
     if mods & 1 != 0 { s += "alt-"; }
@@ -264,4 +298,17 @@ pub fn cmd_label(rest: &str) -> String {
     let mut parts = vec![(if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" }).to_string()];
     for p in rest.split('+') { parts.push(if p == "Shift" { MOD_NAMES[2].to_string() } else { p.to_string() }); }
     join(parts)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shifted_quote_round_trips_for_local_and_global_shortcuts() {
+        let (mods, vk) = shortcut_key("\"", 8).unwrap();
+        assert_eq!((mods, vk), (12, 0xDE));
+        assert_eq!(binding(mods, vk).as_deref(), Some("super-\""));
+        assert!(hotkey(mods, vk).is_some());
+    }
 }

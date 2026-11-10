@@ -14,6 +14,8 @@ diff -ru $R/taffy-0.9.0/src vendor/taffy/src
 
 ## GPUI 0.2.2
 
+- `platform/mac/window.rs`: GPUIView accepts first-responder status so the native view receives keyboard and IME input in macOS panels.
+
 - `platform/windows/events.rs`: `VK_PROCESSKEY` 始终交给 IME，不在组合结束后重新派发成编辑快捷键，避免小狼毫退格、回车被处理两次。
 
 | # | 文件 | 改动 | 用途 |

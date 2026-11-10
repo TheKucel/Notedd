@@ -113,6 +113,13 @@ unsafe fn build_classes() {
             unsafe {
                 decl.add_method(sel!(dealloc), dealloc_view as extern "C" fn(&Object, Sel));
 
+                // NSView normally declines first-responder status. GPUI sends keyboard
+                // and text-input events to this view, including in nonactivating panels.
+                decl.add_method(
+                    sel!(acceptsFirstResponder),
+                    yes as extern "C" fn(&Object, Sel) -> BOOL,
+                );
+
                 decl.add_method(
                     sel!(performKeyEquivalent:),
                     handle_key_equivalent as extern "C" fn(&Object, Sel, id) -> BOOL,

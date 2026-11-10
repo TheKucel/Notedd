@@ -74,6 +74,8 @@ pub struct Motion {
     pub win_x_to: f32,
     x_glide: bool,
     pub slide: (Ease, Ease),
+    #[cfg(target_os = "macos")]
+    pub window_alpha: Ease,
     pub hiding: bool,
     pub running: bool,
     tick: Instant,
@@ -85,6 +87,8 @@ pub struct Motion {
     pub rb: Ease,
     drag: Option<Drag>,
     pub previews: Rc<RefCell<HashMap<String, Preview>>>,
+    /// The card in front while another card comes forward from underneath it.
+    pub swap_out: Option<String>,
     pub list_len: usize,
     pub region: (i32, i32, u8),
     pub shown_ids: Vec<String>,
@@ -104,8 +108,10 @@ impl Motion {
             anims, colors: HashMap::new(), dark: Ease::at(DARK), ctl_a: Ease::at(1.), cap_n: Ease::at(4.), more_t: Ease::at(0.), last_w: 800., ctl_fade: Ease::at(1.), plus_sc: Ease::at(1.), demo: false, tab_hl: Ease::at(0.), dot_sc: Ease::at(1.),
             win_h: edit_h + PADB, win_h_to: edit_h + PADB, win_x: 0., win_y: 0., win_y_to: 0., win_x_to: 0., x_glide: false,
             slide: (Ease::at(0.), Ease::at(0.)), hiding: false, running: false, tick: Instant::now(), task: None,
+            #[cfg(target_os = "macos")]
+            window_alpha: Ease::at(1.),
             edit_top: 0, docks: 0, rl: Ease::at(R), rr: Ease::at(R), rb: Ease::at(R), drag: None,
-            previews: Rc::new(RefCell::new(HashMap::new())), list_len: 0, region: (0, 0, 255), shown_ids: Vec::new(), anim_since: Instant::now(), starts: Vec::new(),
+            previews: Rc::new(RefCell::new(HashMap::new())), swap_out: None, list_len: 0, region: (0, 0, 255), shown_ids: Vec::new(), anim_since: Instant::now(), starts: Vec::new(),
         }
     }
 }
@@ -114,10 +120,43 @@ fn split(hex: u32) -> [f32; 3] { [((hex >> 16) & 255) as f32, ((hex >> 8) & 255)
 pub fn join(c: [f32; 3]) -> u32 { ((c[0].round() as u32) << 16) | ((c[1].round() as u32) << 8) | c[2].round() as u32 }
 
 impl Shell {
+    /// Exchange two cards: the incoming one peeks out below the outgoing card.
+    pub fn swap_cards(&mut self, outgoing: &str, incoming: &str) {
+        if outgoing == incoming { return; }
+        let h = self.edit_h;
+        if let Some(a) = self.mo.anims.get_mut(incoming) {
+            a.cur = V { y: 14., sc: 0.93, h, o: 1., rot: 0.8, sx: 4., ..Default::default() };
+            a.to = V { y: 0., sc: 1., h, o: 1., ..Default::default() };
+            a.z = 1000;
+            a.delay = 0.;
+        }
+        if let Some(a) = self.mo.anims.get_mut(outgoing) {
+            a.to = V { y: 8., sc: 0.93, h, o: 0., rot: -0.8, sx: -4., ..Default::default() };
+            a.z = 1500;
+            a.delay = 0.;
+            self.mo.swap_out = Some(outgoing.to_string());
+        }
+    }
+
     fn dpi(&self, window: &Window) -> f32 { window.scale_factor() }
 
     pub fn work_area(&self) -> Rect { self.win.work_area() }
     fn monitor_rect(&self) -> Rect { self.win.monitor_rect() }
+
+    /// Dock to the actual display edges on macOS; retain the usable work area elsewhere.
+    fn dock_area(&self) -> Rect {
+        #[cfg(target_os = "macos")]
+        { self.win.monitor_rect() }
+        #[cfg(not(target_os = "macos"))]
+        { self.work_area() }
+    }
+
+    fn drag_dock_area(&self) -> Rect {
+        #[cfg(target_os = "macos")]
+        { self.win.pointer_monitor_rect() }
+        #[cfg(not(target_os = "macos"))]
+        { self.dock_area() }
+    }
 
     /// the visible window: the client area, in screen pixels (what the folder is drawn in)
     pub fn win_rect(&self) -> Rect { self.win.client_rect() }
@@ -256,6 +295,7 @@ impl Shell {
             a.to = if listing { V { y: (a.cur.y + step * direction).max(LIST_TOP), lift: 0., o: 0., rot: 0., sx: 0., ..a.cur } } else { hidden };
             a.delay = 0.;
             if listing && direction <= 0. { a.z = -1; }
+            if !listing { a.z = 999; }
         }
         for (i, id) in visible.iter().enumerate() {
             let sf = i as f32;
@@ -270,7 +310,7 @@ impl Shell {
         }
         if !listing {
             let a = anims.entry(cur.clone()).or_insert(Anim { cur: hidden, ..Default::default() });
-            a.to = V { y: 0., sc: 1., h: eh, o: 1., ..Default::default() };
+            a.to = V { y: 0., sc: 1., h: eh, o: if self.mode == Mode::Settings { 0. } else { 1. }, ..Default::default() };
             a.z = 1000;
             a.delay = 0.;
         }
@@ -280,8 +320,8 @@ impl Shell {
         st.z = 0;
         let up = self.mode == Mode::Settings;
         let se = anims.entry(SETTINGS.to_string()).or_insert_with(|| Anim { cur: V { y: 18., sc: 0.955, h: eh, ..Default::default() }, ..Default::default() });
-        se.to = if up { V { y: 0., sc: 1., h: eh, o: 1., ..Default::default() } } else { V { y: 18., sc: 0.955, h: eh, o: 0., ..Default::default() } };
-        se.z = if up { 1500 } else { -2 };
+        se.to = if up { V { y: 0., sc: 1., h: eh, o: 1., ..Default::default() } } else { V { y: eh * 0.35, sc: 1., h: eh, o: 0., ..Default::default() } };
+        se.z = if up || se.cur.o > 0.01 { 1500 } else { -2 };
         self.mo.colors.retain(|id, _| self.mo.anims.contains_key(id));
         self.mo.dark.to = if self.find_open && self.mode == Mode::Note { DARK_FIND } else if self.hover_plus { DARK_HOVER } else { DARK };
         self.mo.cap_n.to = self.controls().len() as f32;
@@ -301,6 +341,11 @@ impl Shell {
         let k = 1. - (-dt * if sliding { rate } else { 17. }).exp();
         let ko = 1. - (-dt * if sliding { rate * 1.3 } else { 30. }).exp();
         let mut settled = true;
+        #[cfg(target_os = "macos")]
+        {
+            settled &= self.mo.window_alpha.step(1. - (-dt * rate * 1.3).exp(), 0.004);
+            self.win.set_alpha(self.mo.window_alpha.v);
+        }
         if sliding {
             let ks = 1. - (-dt * rate).exp();
             let (a, b) = (self.mo.slide.0.step(ks, 0.5), self.mo.slide.1.step(ks, 0.5));
@@ -325,14 +370,15 @@ impl Shell {
         settled &= self.st.fade.step(1. - (-dt * 16.).exp(), 0.004);
         for e in self.st.seg.values_mut() { settled &= e[0].step(1. - (-dt * 18.).exp(), 0.2); settled &= e[1].step(1. - (-dt * 18.).exp(), 0.2); }
         // a note that makes way for another stays whole until the newcomer is opaque: no see-through flash
-        let hold = self.mode == Mode::Note && self.mo.anims.get(&self.cur).is_some_and(|c| c.cur.o < 0.97 && c.to.o > 0.5);
+        let hold = self.mo.swap_out.is_none() && self.mode == Mode::Note && self.mo.anims.get(&self.cur).is_some_and(|c| !c.cur.near(&c.to) && c.to.o > 0.5);
         let cur_id = self.cur.clone();
         for (id, a) in self.mo.anims.iter_mut() {
             if a.delay > 0. { a.delay -= dt; settled = false; continue; }
             let to = a.to;
             let keep = hold && *id != cur_id && id != SEARCH && id != SETTINGS && to.o == 0. && a.cur.o > 0.5;
             if keep { settled = false; continue; }
-            a.cur.lerp(&to, k, ko);
+            let swap = self.mo.swap_out.as_deref() == Some(id.as_str());
+            a.cur.lerp(&to, k, if swap { k } else { ko });
             if a.cur.near(&to) { a.cur = to; } else { settled = false; }
         }
         let ids: Vec<String> = self.mo.anims.keys().filter(|id| *id != SEARCH && *id != SETTINGS).cloned().collect();
@@ -384,6 +430,8 @@ impl Shell {
         for id in ids { let to = split(self.target_color(&id)); self.mo.colors.insert(id, to); }
         let m = &mut self.mo;
         for e in [&mut m.dark, &mut m.ctl_a, &mut m.cap_n, &mut m.more_t, &mut m.ctl_fade, &mut m.plus_sc, &mut m.tab_hl, &mut m.dot_sc, &mut m.rl, &mut m.rr, &mut m.rb, &mut m.slide.0, &mut m.slide.1] { e.v = e.to; }
+        #[cfg(target_os = "macos")]
+        { m.window_alpha.v = m.window_alpha.to; }
         m.win_h = m.win_h_to;
         m.win_y = m.win_y_to;
         m.win_x = m.win_x_to;
@@ -424,9 +472,12 @@ impl Shell {
     }
 
     fn on_settled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mo.swap_out = None;
         if self.mo.hiding {
             self.mo.hiding = false;
             self.win.hide();
+            #[cfg(target_os = "macos")]
+            { self.win.set_alpha(1.); self.mo.window_alpha = Ease::at(1.); }
             self.mo.slide = (Ease::at(0.), Ease::at(0.));
             self.apply_window(window);
             if self.mode != Mode::List {
@@ -467,9 +518,11 @@ impl Shell {
 
     /// the live editor is on show once its folder has settled in place
     pub fn editor_shown(&self) -> bool {
-        if self.mode != Mode::Note || self.mo.hiding || std::env::var("NOTEDD_NOEDIT").is_ok() { return false; }
+        if self.mode != Mode::Note || std::env::var("NOTEDD_NOEDIT").is_ok() { return false; }
+        #[cfg(not(target_os = "macos"))]
+        if self.mo.hiding { return false; }
         let moving = self.mo.slide.0.v != 0. || self.mo.slide.1.v != 0.;
-        !moving && self.mo.anims.get(&self.cur).is_some_and(|a| a.cur.near(&a.to) && a.to.o > 0.99 && a.delay <= 0.)
+        (!moving || cfg!(target_os = "macos")) && self.mo.anims.get(&self.cur).is_some_and(|a| a.cur.near(&a.to) && a.to.o > 0.99 && a.delay <= 0.)
             && (self.mo.win_h - self.mo.win_h_to).abs() < 0.5
     }
 
@@ -477,6 +530,14 @@ impl Shell {
 
     pub fn appear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let shown = self.win.visible();
+        #[cfg(target_os = "macos")]
+        if !self.win.foreground() {
+            self.win.move_to_pointer_screen();
+            let r = self.win_rect();
+            self.mo.win_x = r.left as f32; self.mo.win_x_to = self.mo.win_x;
+            self.mo.win_y = r.top as f32; self.mo.win_y_to = self.mo.win_y;
+            self.mo.edit_top = r.top;
+        }
         if !shown || self.mo.hiding {
             self.mo.hiding = false;
             if !shown {
@@ -486,11 +547,17 @@ impl Shell {
                 self.mo.win_y = r.top as f32;
                 let (dx, dy) = self.slide_offset(&r, s);
                 self.mo.slide = (Ease::at(dx), Ease::at(dy));
+                #[cfg(not(target_os = "macos"))]
                 if self.fades() { self.mo.ctl_a = Ease::at(0.); }
+                #[cfg(target_os = "macos")]
+                if self.fades() { self.mo.window_alpha = Ease::at(0.); self.win.set_alpha(0.); }
             }
+            #[cfg(target_os = "macos")]
+            { self.mo.window_alpha.to = 1.; }
             self.mo.ctl_a.to = 1.;
             self.mo.slide.0.to = 0.;
             self.mo.slide.1.to = 0.;
+            #[cfg(not(target_os = "macos"))]
             if self.mode != Mode::List && self.fades() {
                 let id = if self.mode == Mode::Settings { SETTINGS.to_string() } else { self.cur.clone() };
                 let in_place = self.prefs.dir == 4;
@@ -502,6 +569,7 @@ impl Shell {
             self.apply_window(window);
         }
         self.win.show();
+        #[cfg(not(target_os = "macos"))]
         window.activate_window();
         self.focus_main(window, cx);
         self.retarget(false, 0, window, cx);
@@ -517,9 +585,22 @@ impl Shell {
         self.capture = None;
         if !self.win.visible() { return; }
         if self.mode == Mode::List && self.fades() { self.win.hide(); self.mo.ctl_a = Ease::at(0.); return; }
+        if self.mode == Mode::Settings {
+            // Finish any exchange before fading, so the previous note cannot show through.
+            self.mo.swap_out = None;
+            for (id, a) in self.mo.anims.iter_mut() {
+                if id != SETTINGS { a.cur.o = 0.; a.to.o = 0.; }
+            }
+            if let Some(a) = self.mo.anims.get_mut(SETTINGS) {
+                a.cur = V { y: 0., sc: 1., h: self.edit_h, o: 1., ..Default::default() };
+            }
+        }
         if self.find_open { self.close_find(window, cx); }
         self.ctl_open = false;
+        #[cfg(not(target_os = "macos"))]
         if self.fades() { self.mo.ctl_a.to = 0.; }
+        #[cfg(target_os = "macos")]
+        if self.fades() { self.mo.window_alpha.to = 0.; }
         if !self.mo.hiding {
             let s = self.dpi(window);
             let r = self.win_rect();
@@ -530,6 +611,7 @@ impl Shell {
             self.mo.slide.0.to = dx;
             self.mo.slide.1.to = dy;
         }
+        #[cfg(not(target_os = "macos"))]
         if self.mode != Mode::List && self.fades() {
             let id = if self.mode == Mode::Settings { SETTINGS.to_string() } else { self.cur.clone() };
             let in_place = self.prefs.dir == 4;
@@ -569,7 +651,7 @@ impl Shell {
 
     pub fn update_docked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let r = self.win_rect();
-        let work = self.work_area();
+        let work = self.dock_area();
         let s = self.dpi(window);
         let top = if self.mode != Mode::List { self.mo.edit_top } else { r.top };
         self.mo.docks = if self.mode != Mode::List { self.docks_of(r.left, top, r.right - r.left, r.bottom - r.top, &work, s) } else { 0 };
@@ -606,7 +688,7 @@ impl Shell {
         let s = self.dpi(window);
         let mut r = Rect { left: r0.left + dx, top: r0.top + dy, right: r0.right + dx, bottom: r0.bottom + dy };
         if self.mode != Mode::List {
-            let work = self.work_area();
+            let work = self.drag_dock_area();
             let (hw, w) = (r.bottom - r.top, r.right - r.left);
             let hf = ((self.eh()) * s).round() as i32;
             let zone = ZONE * s;
@@ -643,7 +725,7 @@ impl Shell {
             self.retarget(false, 0, window, cx);
             return;
         }
-        let work = self.work_area();
+        let work = self.drag_dock_area();
         let (w, hf) = (r.right - r.left, (self.eh() * s).round() as i32);
         let near = |gap: i32| gap > 0 && (gap as f32) < GLIDE * s;
         if near(work.bottom - (r.top + hf)) { self.mo.win_y_to = (work.bottom - hf) as f32; }

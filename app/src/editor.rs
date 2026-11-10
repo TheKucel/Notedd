@@ -19,7 +19,7 @@ actions!(
         Backspace, Delete, Enter, CtrlEnter, Left, Right, Up, Down, SelectLeft, SelectRight, SelectUp, SelectDown,
         WordLeft, WordRight, SelectWordLeft, SelectWordRight, Home, End, SelectHome, SelectEnd, DocStart, DocEnd,
         SelectDocStart, SelectDocEnd, SelectAll, Copy, Cut, Paste, Undo, Redo, Bold, Italic, Strike, Highlight, Code,
-        DeleteWordBack, Cancel,
+        DeleteWordBack, DeleteLineBack, Cancel,
     ]
 );
 
@@ -85,6 +85,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-up", SelectDocStart, c),
         KeyBinding::new("cmd-shift-down", SelectDocEnd, c),
         KeyBinding::new("alt-backspace", DeleteWordBack, c),
+        KeyBinding::new("cmd-backspace", DeleteLineBack, c),
     ]);
 }
 
@@ -812,6 +813,11 @@ impl Render for Editor {
                         .on_action(cx.listener(|e, _: &Backspace, w, cx| { e.marked = None; e.core.backspace(); e.changed(w, cx); }))
             .on_action(cx.listener(|e, _: &Delete, w, cx| { e.core.delete_forward(); e.changed(w, cx); }))
             .on_action(cx.listener(|e, _: &DeleteWordBack, w, cx| { e.core.delete_word_back(); e.changed(w, cx); }))
+            .on_action(cx.listener(|e, _: &DeleteLineBack, w, cx| {
+                e.marked = None;
+                if e.core.collapsed() { e.line_edge(false, true, w, cx); }
+                if e.core.delete_selection() { e.changed(w, cx); }
+            }))
             .on_action(cx.listener(|e, _: &Enter, w, cx| { if e.single { cx.emit(EditorEvent::Submit); return; } e.marked = None; e.core.enter(); e.changed(w, cx); }))
             .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(EditorEvent::Cancel)))
             .on_action(cx.listener(|e, _: &CtrlEnter, w, cx| {

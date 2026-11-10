@@ -79,7 +79,7 @@ impl Win {
         unsafe {
             let c = self.from_px(r);
             let f: NSRect = msg_send![self.w(), frameRectForContentRect: c];
-            let _: () = msg_send![self.w(), setFrame: f display: YES];
+            let _: () = msg_send![self.w(), setFrame: f display: NO];
         }
     }
 
@@ -110,6 +110,24 @@ impl Win {
         self.to_px(f)
     }
 
+    /// Full bounds of the display under the pointer, including the menu bar and Dock.
+    pub fn pointer_monitor_rect(self) -> Rect {
+        unsafe {
+            let p: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+            let screens: id = msg_send![class!(NSScreen), screens];
+            if screens == nil { return self.monitor_rect(); }
+            let n: usize = msg_send![screens, count];
+            for i in 0..n {
+                let screen: id = msg_send![screens, objectAtIndex: i];
+                let f: NSRect = msg_send![screen, frame];
+                if p.x >= f.origin.x && p.x < f.origin.x + f.size.width && p.y >= f.origin.y && p.y < f.origin.y + f.size.height {
+                    return self.to_px(f);
+                }
+            }
+        }
+        self.monitor_rect()
+    }
+
     /// only these parts of the client area (client coordinates) take clicks; `None`: all of it.
     /// What lies outside them is transparent anyway; AppKit just would not let clicks through it.
     pub fn set_shape(self, parts: Option<&[Rect]>) {
@@ -136,14 +154,19 @@ impl Win {
         if self.0 == 0 { return; }
         unsafe { let _: () = msg_send![self.w(), orderOut: nil]; }
     }
+    pub fn set_alpha(self, alpha: f32) {
+        if self.0 == 0 { return; }
+        unsafe { let _: () = msg_send![self.w(), setAlphaValue: alpha.clamp(0., 1.) as f64]; }
+    }
     pub fn show(self) {
         if self.0 == 0 { return; }
         unsafe {
             let m: BOOL = msg_send![self.w(), isMiniaturized];
             if m == YES { let _: () = msg_send![self.w(), deminiaturize: nil]; }
-            // an accessory app is never active by itself: take the focus like a menu bar app does
-            let app: id = msg_send![class!(NSApplication), sharedApplication];
-            let _: () = msg_send![app, activateIgnoringOtherApps: YES];
+            // Full-screen windows sit above NSFloatingWindowLevel. Use the status-window
+            // level while Notedd is active, as menu-bar overlays do.
+            let _: () = msg_send![self.w(), setLevel: 25isize];
+            // A nonactivating panel can take keyboard focus without switching applications or Spaces.
             let _: () = msg_send![self.w(), makeKeyAndOrderFront: nil];
         }
     }
@@ -151,16 +174,14 @@ impl Win {
     pub fn foreground(self) -> bool {
         if self.0 == 0 { return false; }
         unsafe {
-            let app: id = msg_send![class!(NSApplication), sharedApplication];
-            let active: BOOL = msg_send![app, isActive];
             let key: BOOL = msg_send![self.w(), isKeyWindow];
-            active == YES && key == YES
+            key == YES
         }
     }
     pub fn set_topmost(self, on: bool) {
         if self.0 == 0 { return; }
-        // NSFloatingWindowLevel / NSNormalWindowLevel
-        let level: isize = if on { 3 } else { 0 };
+        // NSStatusWindowLevel / NSNormalWindowLevel
+        let level: isize = if on { 25 } else { 0 };
         unsafe { let _: () = msg_send![self.w(), setLevel: level]; }
     }
 
@@ -169,12 +190,40 @@ impl Win {
         if self.0 == 0 { return; }
         unsafe {
             let _: () = msg_send![self.w(), setHasShadow: NO];
-            // NSWindowCollectionBehaviorMoveToActiveSpace | NSWindowCollectionBehaviorFullScreenAuxiliary
-            let behavior: usize = (1 << 1) | (1 << 8);
+            // GPUI creates a titled full-size window even without a title bar. A borderless
+            // window avoids the native outline around our transparent, custom-shaped content.
+            // Borderless NSPanel, retaining NSWindowStyleMaskNonactivatingPanel.
+            let _: () = msg_send![self.w(), setStyleMask: (1usize << 7)];
+            let _: () = msg_send![self.w(), setHidesOnDeactivate: NO];
+            // Move to the current Space when activated, including other apps' full-screen Spaces.
+            let behavior: usize = (1 << 0) | (1 << 8) | (1 << 18);
             let _: () = msg_send![self.w(), setCollectionBehavior: behavior];
             // NSApplicationActivationPolicyAccessory: the tray icon stands for the app, like on Windows
             let app: id = msg_send![class!(NSApplication), sharedApplication];
             let _: BOOL = msg_send![app, setActivationPolicy: 1isize];
+        }
+    }
+
+    /// When invoked on another display, bring the window to the display containing the pointer.
+    pub fn move_to_pointer_screen(self) {
+        if self.0 == 0 { return; }
+        unsafe {
+            let p: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+            let screens: id = msg_send![class!(NSScreen), screens];
+            let n: usize = msg_send![screens, count];
+            let current: id = msg_send![self.w(), screen];
+            for i in 0..n {
+                let screen: id = msg_send![screens, objectAtIndex: i];
+                let frame: NSRect = msg_send![screen, frame];
+                if p.x < frame.origin.x || p.x >= frame.origin.x + frame.size.width || p.y < frame.origin.y || p.y >= frame.origin.y + frame.size.height { continue; }
+                if screen == current { break; }
+                let visible: NSRect = msg_send![screen, visibleFrame];
+                let mut window_frame: NSRect = msg_send![self.w(), frame];
+                window_frame.origin.x = visible.origin.x + (visible.size.width - window_frame.size.width).max(0.) / 2.;
+                window_frame.origin.y = visible.origin.y + (visible.size.height - window_frame.size.height).max(0.) / 2.;
+                let _: () = msg_send![self.w(), setFrame: window_frame display: NO];
+                break;
+            }
         }
     }
 

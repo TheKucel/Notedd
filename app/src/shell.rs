@@ -191,6 +191,18 @@ fn single_input(shell: &mut Shell, placeholder: &str, window: &mut Window, cx: &
 impl Shell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Shell {
         let prefs = settings::load();
+        cx.observe_window_appearance(window, |this, window, cx| {
+            settings::set_system_dark(matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark));
+            if this.prefs.theme == 2 {
+                this.th = AppTheme::new(&this.prefs);
+                this.apply_look(cx);
+                cx.notify();
+            }
+        }).detach();
+        #[cfg(target_os = "macos")]
+        cx.observe_window_activation(window, |this, window, _| {
+            this.win.set_topmost(this.prefs.pinned || window.is_window_active());
+        }).detach();
         locale::set(prefs.language);
         let th = AppTheme::new(&prefs);
         let dir = settings::notes_dir();
@@ -347,11 +359,13 @@ impl Shell {
 
     fn new_note(&mut self, title: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.save_now(cx);
+        let outgoing = (self.mode == Mode::Note).then(|| self.cur.clone());
         let mut n = Note::new(store::new_id(), 0, if title.is_empty() { String::new() } else { format!("{title}\n") }, store::now_ft());
         n.opened = store::now_ft();
         let id = n.id.clone();
         self.notes.push(n);
         self.open_note(&id, window, cx);
+        if let Some(old) = outgoing { self.swap_cards(&old, &id); }
         self.body.update(cx, |b, cx| b.go_to_end(window, cx));
     }
 
@@ -443,6 +457,7 @@ impl Shell {
         self.capture = None;
         self.sync_hexes(cx);
         self.retarget(false, 0, window, cx);
+        if self.back == Mode::Note { self.swap_cards(&self.cur.clone(), SETTINGS); }
         self.focus_main(window, cx);
     }
 
@@ -452,7 +467,7 @@ impl Shell {
         if self.palette { self.palette = false; return cx.notify(); }
         if self.mode == Mode::Settings && self.st.pick.is_some() { self.st.pick = None; return cx.notify(); }
         match self.mode {
-            Mode::Settings => { self.mode = self.back; self.retarget(false, 0, window, cx); self.focus_main(window, cx); }
+            Mode::Settings => { self.mode = self.back; self.retarget(false, 0, window, cx); if self.mode == Mode::Note { self.swap_cards(SETTINGS, &self.cur.clone()); } self.focus_main(window, cx); }
             Mode::List => { let id = self.cur.clone(); self.open_note(&id, window, cx); }
             Mode::Note => {
                 if self.find_open { self.close_find(window, cx); } else { self.hide(window, cx); }
@@ -540,7 +555,7 @@ impl Shell {
 
     fn pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.prefs.pinned = !self.prefs.pinned;
-        self.win.set_topmost(self.prefs.pinned);
+        self.win.set_topmost(self.prefs.pinned || (cfg!(target_os = "macos") && window.is_window_active()));
         self.apply_prefs(window, cx);
     }
 
@@ -575,7 +590,7 @@ impl Shell {
                 self.toggle_window(window, cx);
             }
             Cmd::NewNote => { self.appear(window, cx); self.new_note("", window, cx); }
-            Cmd::OpenFolder => { let _ = std::process::Command::new("explorer").arg(&self.dir).spawn(); }
+            Cmd::OpenFolder => { system::open_folder(&self.dir); }
             Cmd::Quit => self.quit(cx),
         }
     }
@@ -1075,7 +1090,7 @@ impl Shell {
             (*c, on)
         }).collect();
         let set_o = self.mo.anims.get(SETTINGS).map_or(0., |a| a.cur.o.clamp(0., 1.));
-        let set = if self.mode == Mode::Settings && set_o > 0.05 { Some(self.set_draw(window, cx, w, set_o)) } else { None };
+        let set = if set_o > 0.05 { Some(self.set_draw(window, cx, w, set_o)) } else { None };
         if self.palette != self.pal_prev {
             self.pal_prev = self.palette;
             if self.palette {
@@ -1129,7 +1144,7 @@ impl Shell {
                 let mods = system::mods_of(&ev.keystroke.modifiers);
                 if key == "escape" { s.capture = None; return cx.notify(); }
                 if key == "backspace" && mods == 0 { s.prefs.keys[i] = (0, 0); s.capture = None; return s.apply_prefs(w, cx); }
-                let Some(vk) = system::key_to_vk(key) else { return };
+                let Some((mods, vk)) = system::shortcut_key(key, mods) else { return };
                 let fkey = (0x70..=0x87).contains(&vk);
                 if mods == 0 && (i < 2 || !fkey) { return; }
                 s.prefs.keys[i] = (mods, vk);
