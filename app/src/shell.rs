@@ -396,7 +396,13 @@ impl Shell {
             Mode::List => match self.shown(cx).get(self.sel) { Some(&i) => self.notes[i].id.clone(), None => return },
             Mode::Note => self.cur.clone(),
         };
+        let keep = (self.mode == Mode::List).then_some(self.sel);
         self.delete_note(&id, window, cx);
+        // the pointer has not moved: the slot under it stays picked, so the next Delete takes the note now there
+        if let Some(k) = keep {
+            let n = self.shown(cx).len();
+            if self.mode == Mode::List && n > 0 { self.sel = k.min(n - 1); self.retarget(false, 0, window, cx); }
+        }
     }
 
     fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -730,9 +736,11 @@ struct Draw {
     dir: PathBuf,
     scale: f32,
     set: Option<setui::SetDraw>,
-    pal: Option<PalDraw>,
     previews: Rc<std::cell::RefCell<std::collections::HashMap<String, crate::editor::Preview>>>,
 }
+
+/// height of the palette's box in the stack: the colour row (44) and the delete row (36)
+const PAL_LIST_H: f32 = 80.;
 
 #[derive(Clone)]
 struct PalDraw { x0: f32, y0: f32, pw: f32, ph: f32, t: f32, chosen: usize, cols: Vec<u32>, sc: Vec<f32>, listing: bool, del_hover: bool }
@@ -770,11 +778,13 @@ fn paint_palette(pd: &PalDraw, th: &AppTheme, window: &mut Window, cx: &mut App)
         ln.line_to(point(px(x0 + pd.pw - 12.), px(y)));
         if let Ok(p) = ln.build() { window.paint_path(p, sep); }
         if pd.del_hover {
-            let b = Bounds::new(point(px(x0 + 5.), px(y + 4.)), size(px(pd.pw - 10.), px(pd.ph - 44. - 9.)));
+            let b = Bounds::new(point(px(x0 + 5.), px(y + 4.)), size(px(pd.pw - 10.), px(pd.ph - 44. - 8.)));
             window.paint_quad(fill(b, al(ink, 0.09 * t)).corner_radii(px(8.)));
         }
-        glyph(window, TRASH, x0 + 22., y + 19., 16., 1.4, al(ink, t), false);
-        text(window, cx, ui::DELETE_NOTE.get(), point(px(x0 + 39.), px(y + 19. - 13. * 0.7)), 13., FontWeight::NORMAL, al(ink, t), pd.pw - 49.);
+        // the row is 4px from the line and 4px from the bottom edge; its content sits in the middle
+        let cy = y + (pd.ph - 44.) / 2.;
+        glyph(window, TRASH, x0 + 22., cy, 16., 1.4, al(ink, t), false);
+        text(window, cx, ui::DELETE_NOTE.get(), point(px(x0 + 39.), px(cy - 13. * 0.7)), 13., FontWeight::NORMAL, al(ink, t), pd.pw - 49.);
     }
 }
 
@@ -912,7 +922,6 @@ fn paint_all(d: &Draw, window: &mut Window, cx: &mut App) {
         }
     }
     set_glyph_rotation(None);
-    if let Some(pd) = &d.pal { paint_palette(pd, th, window, cx); }
     // the controls: a paper capsule with line icons
     let a = d.ctl_a.clamp(0., 1.);
     if a < 0.01 { return; }
@@ -1103,7 +1112,7 @@ impl Shell {
         let listing_now = self.mode == Mode::List;
         let pal_n = self.prefs.ncards;
         let pal_w = pal_n as f32 * 32. + (pal_n as f32 - 1.) * 4. + 12.;
-        let (pw, ph) = if listing_now { (pal_w.max(184.), 88.) } else { (pal_w, 44.) };
+        let (pw, ph) = if listing_now { (pal_w.max(184.), PAL_LIST_H) } else { (pal_w, 44.) };
         let dot_k = ctls.iter().position(|c| *c == Ctl::Dot);
         let pal_open = self.palette && (listing_now || (self.mode == Mode::Note && dot_k.is_some()));
         let pal_id = if listing_now { self.pal_id.clone() } else { self.cur.clone() };
@@ -1121,7 +1130,7 @@ impl Shell {
         let draw = Draw {
             th, w, mode: self.mode, find_open: self.find_open, find_label, items, controls, ctl_prev: self.ctl_prev.clone(), ctl_fade: self.mo.ctl_fade.v, query: if listing { q.clone() } else { String::new() }, pinned: self.prefs.pinned, plus_sc: self.mo.plus_sc.v, cap_n: self.mo.cap_n.v, ctl_a: self.mo.ctl_a.v, more_t: self.mo.more_t.v, dot_sc: self.mo.dot_sc.v, tab_hl: self.mo.tab_hl.v,
             dot_color: self.note_color(), radii: (self.mo.rl.v, self.mo.rr.v, self.mo.rb.v), dir: self.dir.clone(),
-            scale: self.prefs.scale as f32 / 100., previews: self.mo.previews.clone(), set: set.clone(), pal: pal.clone(),
+            scale: self.prefs.scale as f32 / 100., previews: self.mo.previews.clone(), set: set.clone(),
         };
 
         let mut root = div()
@@ -1171,7 +1180,10 @@ impl Shell {
             .on_action(cx.listener(|s, _: &OpenSettings, w, cx| s.open_settings(w, cx)))
             .on_action(cx.listener(|s, _: &TogglePin, w, cx| s.pin(w, cx)))
             .on_action(cx.listener(|s, _: &QuitApp, _, cx| s.quit(cx)))
-            .on_action(cx.listener(|s, _: &NoteColor, w, cx| if s.mode == Mode::Note { s.pal_at = (s.mo.last_w / 2., T + 8.); s.palette = !s.palette; s.sync_caps(w, cx); }))
+            .on_action(cx.listener(|s, _: &NoteColor, w, cx| if s.mode == Mode::Note {
+                // the same way as the dot button: the drawer opens and the palette hangs under the dot
+                if s.palette { s.palette = false; s.sync_caps(w, cx); } else { s.ctl_open = true; s.press(Ctl::Dot, w, cx); }
+            }))
             .on_action(cx.listener(|s, _: &DeleteNote, w, cx| s.delete_by_key(w, cx)))
             .on_action(cx.listener(|s, _: &ZoomIn, w, cx| s.zoom(10, w, cx)))
             .on_action(cx.listener(|s, _: &ZoomOut, w, cx| s.zoom(-10, w, cx)))
@@ -1306,6 +1318,11 @@ impl Shell {
                 }))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |s, _, w, cx| { cx.stop_propagation(); s.press(ctl, w, cx); })));
         }
+        // the palette is painted above the note's text
+        if let Some(pd) = pal.clone() {
+            let th = self.th;
+            root = root.child(canvas(|_, _, _| (), move |_, _, window, cx| paint_palette(&pd, &th, window, cx)).absolute().size_full());
+        }
         if pal_open {
             let dot_x = dot_k.map(|k| 1. + ctl_x(w, k));
             let mut boxd = div().id("palette").absolute().left(px(1. + pal_left)).top(px(1. + pal_top)).w(px(pw)).h(px(ph))
@@ -1334,7 +1351,7 @@ impl Shell {
                     })));
             }
             if listing_now {
-                boxd = boxd.child(div().id("pal-del").absolute().left(px(5.)).top(px(48.)).w(px(pw - 10.)).h(px(ph - 53.)).cursor_pointer()
+                boxd = boxd.child(div().id("pal-del").absolute().left(px(5.)).top(px(48.)).w(px(pw - 10.)).h(px(ph - 52.)).cursor_pointer()
                     .on_hover(cx.listener(|s, h: &bool, _, cx| { let v = if *h { Some(100) } else { None }; if s.pal_hover != v { s.pal_hover = v; cx.notify(); } }))
                     .on_mouse_down(MouseButton::Left, cx.listener(|s, _, w, cx| {
                         let id = s.pal_id.clone();

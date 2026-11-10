@@ -65,7 +65,7 @@ diff -ru $R/taffy-0.9.0/src vendor/taffy/src
 ## notedd
 
 - `window.rs`: `set_glyph_rotation(Some((angle, x, y)))` makes `paint_glyph` lean glyph sprites about a pivot (the tilted folder in the notes list). Reset with `None`.
-- `path_builder.rs`: strokes are round-capped/round-joined with tolerance 0.02 (icons); `directx_renderer.rs`: path MSAA back to 4x (8x cost ~20% GPU while the notes stack moved).
+- `path_builder.rs`: strokes are round-capped/round-joined with tolerance 0.02 (icons); `directx_renderer.rs`: path MSAA 8x (4x upstream; 8x costs ~20% GPU while the notes stack moves).
 - `platform/windows/keyboard.rs`: OEM punctuation keys keep their US names on every layout.
 - `scene.rs` `PolychromeSprite.transformation`, `window.rs` `paint_image`/`paint_emoji`, `platform/windows/shaders.hlsl`: pictures and emoji lean with the glyph rotation too (rounded corners measured before the turn). `glyph_rotation()` reads the current lean. The wgsl struct got the field only to keep the stride; Metal/Blade do not apply it.
 - `platform/windows/events.rs` `handle_hit_test_msg`: no `HTTOP` strip along the top of the client area. It took clicks meant for the folder's own top-edge grip and started a native sizing loop that the window animation undid, so the window could not be sized upwards.

@@ -29,8 +29,8 @@ use crate::{
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 // This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
-// notedd: 4x (upstream's count). 8x doubled the cost of every frame of the moving notes stack.
-const PATH_MULTISAMPLE_COUNT: u32 = 4;
+// notedd: 8x for smoother edges of the rounded folders (upstream uses 4x).
+const PATH_MULTISAMPLE_COUNT: u32 = 8;
 
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
