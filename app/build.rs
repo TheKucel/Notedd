@@ -1,4 +1,5 @@
-//! Embeds the manifest, the icon and the version info (Explorer, the taskbar and shortcuts show them).
+//! Windows: embeds the icon and the version info (Explorer, the taskbar and shortcuts show them).
+//! The manifest comes from GPUI (its `windows-manifest` feature).
 
 use std::path::{Path, PathBuf};
 
@@ -12,22 +13,21 @@ fn rc_exe() -> Option<PathBuf> {
 }
 
 fn main() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let m = dir.join("notedd.manifest");
-    println!("cargo:rerun-if-changed=notedd.manifest");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
-    println!("cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}", m.display());
-
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") { return; }
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let icon = dir.join("..").join("assets").join("notedd.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
+    let version = env!("CARGO_PKG_VERSION");
+    let nums: Vec<&str> = version.split('.').chain(std::iter::repeat("0")).take(4).collect();
+    let commas = nums.join(",");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let rc = out.join("notedd.rc");
     let res = out.join("notedd.res");
-    let text = format!(r#"1 ICON "{}"
+    let text = format!(r#"1 ICON "{icon}"
 1 VERSIONINFO
-FILEVERSION 1,2,2,0
-PRODUCTVERSION 1,2,2,0
+FILEVERSION {commas}
+PRODUCTVERSION {commas}
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -35,9 +35,9 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Notedd"
       VALUE "FileDescription", "Notedd"
-      VALUE "FileVersion", "1.2.2"
+      VALUE "FileVersion", "{version}"
       VALUE "ProductName", "Notedd"
-      VALUE "ProductVersion", "1.2.2"
+      VALUE "ProductVersion", "{version}"
       VALUE "OriginalFilename", "notedd.exe"
     END
   END
@@ -46,7 +46,7 @@ BEGIN
     VALUE "Translation", 0x419, 1200
   END
 END
-"#, icon.display().to_string().replace('\\', "\\\\"));
+"#, icon = icon.display().to_string().replace('\\', "\\\\"));
     std::fs::write(&rc, text).unwrap();
     let Some(rc_exe) = rc_exe() else { println!("cargo:warning=rc.exe not found: no icon in the exe"); return };
     let ok = std::process::Command::new(rc_exe).arg("/nologo").arg("/fo").arg(&res).arg(&rc).status().map(|s| s.success()).unwrap_or(false);

@@ -27,8 +27,8 @@ pub fn single_instance() -> bool {
     use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE};
     unsafe {
         // the handle stays open for the life of the process
-        if CreateMutexW(None, true, w!("Local\\NoteddGpuiInstance")).is_err() { return true; }
-        let ev = CreateEventW(None, false, false, w!("Local\\NoteddGpuiShow"));
+        if CreateMutexW(None, true, w!("Local\\NoteddInstance")).is_err() { return true; }
+        let ev = CreateEventW(None, false, false, w!("Local\\NoteddShow"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             if let Ok(ev) = ev { let _ = SetEvent(ev); }
             return false;
@@ -40,6 +40,13 @@ pub fn single_instance() -> bool {
             if WaitForSingleObject(HANDLE(raw as *mut _), INFINITE).0 != 0 { break; }
             send(Cmd::Show);
         });
+        // the installer sets this to replace or remove the exe
+        if let Ok(quit) = CreateEventW(None, false, false, w!("Local\\NoteddQuit")) {
+            let raw = quit.0 as usize;
+            std::thread::spawn(move || {
+                if WaitForSingleObject(HANDLE(raw as *mut _), INFINITE).0 == 0 { send(Cmd::Quit); }
+            });
+        }
         true
     }
 }

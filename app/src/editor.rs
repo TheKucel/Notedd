@@ -88,11 +88,11 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// With NOTEDD_DEBUG set, key presses and paste results go to notedd-gpui-debug.txt in the temp folder.
+/// With NOTEDD_DEBUG set, key presses and paste results go to notedd-debug.txt in the temp folder.
 pub fn debug_log(line: &str) {
     if std::env::var_os("NOTEDD_DEBUG").is_none() { return; }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("notedd-gpui-debug.txt")) { let _ = writeln!(f, "{line}"); }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("notedd-debug.txt")) { let _ = writeln!(f, "{line}"); }
 }
 
 fn al_(mut c: Hsla, o: f32) -> Hsla { c.a *= o; c }
