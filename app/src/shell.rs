@@ -169,6 +169,7 @@ fn bind_keys(cx: &mut App, p: &Prefs) {
             6 => KeyBinding::new(&b, TogglePin, s),
             7 => KeyBinding::new(&b, QuitApp, s),
             8 => KeyBinding::new(&b, NoteColor, s),
+            9 if matches!(b.as_str(), "delete" | "backspace") => continue,
             9 => KeyBinding::new(&b, DeleteNote, s),
             _ => KeyBinding::new(&b, editor::Highlight, Some("Editor")),
         };
@@ -387,7 +388,13 @@ impl Shell {
             store::write_state(&self.dir, &self.cur);
             self.load_current(window, cx);
         }
-        self.enter_list(window, cx);
+        if self.mode == Mode::List {
+            self.palette = false;
+            self.refresh_search_placeholder(cx);
+            self.retarget(false, 0, window, cx);
+        } else {
+            self.enter_list(window, cx);
+        }
     }
 
     fn delete_by_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -396,13 +403,8 @@ impl Shell {
             Mode::List => match self.shown(cx).get(self.sel) { Some(&i) => self.notes[i].id.clone(), None => return },
             Mode::Note => self.cur.clone(),
         };
-        let keep = (self.mode == Mode::List).then_some(self.sel);
+        // Retarget the existing list so the next card in this slot stays picked.
         self.delete_note(&id, window, cx);
-        // the pointer has not moved: the slot under it stays picked, so the next Delete takes the note now there
-        if let Some(k) = keep {
-            let n = self.shown(cx).len();
-            if self.mode == Mode::List && n > 0 { self.sel = k.min(n - 1); self.retarget(false, 0, window, cx); }
-        }
     }
 
     fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -447,10 +449,18 @@ impl Shell {
         self.find_open = false;
         self.capture = None;
         self.sel = 0;
-        let ph = if self.deleted.is_some() { ui::NOTE_DELETED.get() } else { ui::SEARCH_NOTES.get() };
-        self.search.update(cx, |s, _| { s.set_markdown("", PathBuf::new()); s.placeholder = ph.to_string().into(); });
+        self.search.update(cx, |s, _| s.set_markdown("", PathBuf::new()));
+        self.refresh_search_placeholder(cx);
         self.retarget(true, 0, window, cx);
         self.focus_main(window, cx);
+    }
+
+    fn refresh_search_placeholder(&self, cx: &mut Context<Self>) {
+        let ph = if self.deleted.is_some() { ui::NOTE_DELETED.get() } else { ui::SEARCH_NOTES.get() };
+        self.search.update(cx, |s, cx| {
+            s.placeholder = ph.into();
+            cx.notify();
+        });
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -631,13 +641,12 @@ impl Shell {
 
     // ---- views ------------------------------------------------------------------
 
-    /// keys of the stack the search box does not use: Delete removes the picked note, Home and End jump
+    /// List shortcuts when the search box isn't handling the key.
     fn list_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let m = &ev.keystroke.modifiers;
         if m.control || m.alt || m.shift || m.platform || self.palette { return false; }
         let n = self.shown(cx).len();
         match ev.keystroke.key.as_str() {
-            "delete" => { self.delete_by_key(window, cx); true }
             "home" | "end" if n > 0 => {
                 // the stack grows upwards: Home is the front note, End the one at the back
                 self.sel = if ev.keystroke.key == "home" { 0 } else { n - 1 };

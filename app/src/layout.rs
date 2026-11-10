@@ -25,10 +25,6 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub fn faded(mut self, o: f32) -> Theme {
-        for c in [&mut self.bg, &mut self.ink, &mut self.dim, &mut self.accent, &mut self.selection, &mut self.highlight, &mut self.code_bg, &mut self.line, &mut self.ink3, &mut self.find, &mut self.dark, &mut self.on_dark] { c.a *= o; }
-        self
-    }
     pub fn from_app(a: &crate::theme::AppTheme) -> Theme {
         use crate::theme::{c, mix};
         let sel = (a.ink << 8) | if a.night { 0x3d } else { 0x26 };

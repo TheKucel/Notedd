@@ -44,7 +44,7 @@ These bindings are for Windows and Linux. On macOS, `Command` takes the place of
 | `Ctrl+T` | Keep the window on top |
 | `Ctrl+Shift+C` | Change the note color |
 | `Ctrl+Shift+H` | Toggle highlight on the selected text |
-| `Ctrl+Shift+Delete` or `Delete` in the stack | Delete a note |
+| `Ctrl+Shift+Delete` | Delete a note |
 | `Ctrl+Z` in the stack | Bring back the last deleted note |
 | `Ctrl+,` | Open settings |
 | `Ctrl+Q` | Quit |

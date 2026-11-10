@@ -1080,9 +1080,8 @@ impl Preview {
         src.hash(&mut h);
         if self.key != h.finish() { self.key = h.finish(); self.doc = Core::from_markdown(src).doc; }
         if self.dir != dir { self.dir = dir.to_path_buf(); self.pics = Pictures::new(dir.to_path_buf()); }
-        let th = Theme::from_app(app).faded(alpha);
-        let salt = app.salt() ^ (alpha.to_bits() as u64);
-        let layout = Rc::new(self.cache.layout(&self.doc, width, &th, salt, scale, false, &mut self.pics, window));
+        let th = Theme::from_app(app);
+        let layout = Rc::new(self.cache.layout(&self.doc, width, &th, app.salt(), scale, false, &mut self.pics, window));
         let markers = list_markers(&self.doc.blocks);
         let mut finds = Vec::new();
         if !query.is_empty() {
@@ -1101,7 +1100,11 @@ impl Preview {
             // what the clip leaves (with room for a leaning folder)
             vis_bottom: f32::from(clip.origin.y + clip.size.height - at.y) + 40.,
         };
-        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| Editor::paint_doc(&data, Bounds::new(at, size(px(width), px(4000.))), window, cx));
+        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+            window.with_element_opacity(Some(alpha), |window| {
+                Editor::paint_doc(&data, Bounds::new(at, size(px(width), px(4000.))), window, cx);
+            });
+        });
     }
 }
 

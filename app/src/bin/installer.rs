@@ -25,6 +25,10 @@ const OY: f32 = 108.;
 const PAD: f32 = 56.;
 const TOP: f32 = 88.;
 const BUTTON_Y: f32 = OY + CARD_H - 80.;
+const INTRO_DURATION: f32 = 0.9;
+const PAGE_DURATION: f32 = 0.48;
+const DONE_DURATION: f32 = 1.04;
+const DONE_ACTIONS_DELAY: f32 = 0.50;
 const DARK: u32 = 0x22211f;
 const PAPER: u32 = 0xfaf7f1;
 const SYSTEM_THEME: locale::Message = locale::Message("Follow macOS", "Как в macOS", "跟随 macOS");
@@ -141,7 +145,6 @@ struct Installer {
     error: Option<String>,
     done: Option<PathBuf>,
     started: Instant,
-    elapsed: f32,
     focus: FocusHandle,
 }
 impl Installer {
@@ -149,33 +152,15 @@ impl Installer {
         let prefs = settings::load(); locale::set(prefs.language);
         let home = dirs::home_dir().unwrap_or_default();
         let notes = settings::notes_dir_pref().unwrap_or_else(|| dirs::document_dir().unwrap_or_else(|| home.clone()).join("Notedd"));
-        Self { page: 0, previous: 0, prefs, notes, app_dir: home.join("Applications"), login: login_path().exists(), change_login: false, desktop: false, language_menu: false, capture: false, working: false, error: None, done: None, started: Instant::now(), elapsed: 0., focus: cx.focus_handle() }
+        Self { page: 0, previous: 0, prefs, notes, app_dir: home.join("Applications"), login: login_path().exists(), change_login: false, desktop: false, language_menu: false, capture: false, working: false, error: None, done: None, started: Instant::now(), focus: cx.focus_handle() }
     }
-    fn go(&mut self, page: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn go(&mut self, page: usize, cx: &mut Context<Self>) {
         self.previous = self.page;
         self.page = page.min(4);
         self.capture = false;
         self.language_menu = false;
-        self.animate(if page == 0 && self.previous == 0 { 0.9 } else { 0.48 }, window, cx);
-    }
-    fn animate(&mut self, duration: f32, window: &mut Window, cx: &mut Context<Self>) {
-        let start = Instant::now();
-        self.started = start;
-        self.elapsed = 0.;
+        self.started = Instant::now();
         cx.notify();
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                // The first update must run after GPUI has registered the window.
-                cx.background_executor().timer(Duration::from_millis(16)).await;
-                let finished = this.update_in(cx, |s, _, cx| {
-                    if s.started != start { return true; }
-                    s.elapsed = start.elapsed().as_secs_f32();
-                    cx.notify();
-                    s.elapsed >= duration && !s.working
-                }).unwrap_or(true);
-                if finished { break; }
-            }
-        }).detach();
     }
     fn pick(&mut self, notes: bool, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(tr("Выберите папку", "Choose a folder").into()), extensions: None });
@@ -187,7 +172,8 @@ impl Installer {
         if running() { self.error = Some(tr("Сначала закройте Notedd и попробуйте снова.", "Quit Notedd and try again.").into()); cx.notify(); return; }
         let (app_dir, notes, prefs, login, change_login, desktop) = (self.app_dir.clone(), self.notes.clone(), self.prefs, self.login, self.change_login, self.desktop);
         self.working = true;
-        self.go(4, window, cx);
+        self.go(4, cx);
+        let started = self.started;
         let task = cx.background_spawn(async move {
             let payload = payload_path()?;
             let destination = install_payload(&payload, &app_dir, &notes, true)?;
@@ -197,31 +183,38 @@ impl Installer {
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            let _ = this.update_in(cx, |s, window, cx| {
+            // A fast install can finish while the last card is still sliding in.
+            if result.is_ok() {
+                let remaining = Duration::from_secs_f32(PAGE_DURATION).saturating_sub(started.elapsed());
+                if !remaining.is_zero() { cx.background_executor().timer(remaining).await; }
+            }
+            let _ = this.update_in(cx, |s, _, cx| {
                 s.working = false;
                 match result {
                     Ok((destination, warning)) => {
                         s.done = Some(destination);
                         s.error = warning;
-                        s.animate(1.6, window, cx);
+                        s.started = Instant::now();
                     }
-                    Err(e) => { s.error = Some(e); cx.notify(); }
+                    Err(e) => s.error = Some(e),
                 }
+                cx.notify();
             });
         }).detach();
     }
     fn advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.page {
-            0..=2 => self.go(self.page + 1, window, cx),
+            0..=2 => self.go(self.page + 1, cx),
             3 => self.install(window, cx),
             _ => {
                 if let Some(path) = &self.done {
+                    if self.started.elapsed().as_secs_f32() < DONE_ACTIONS_DELAY { return; }
                     match std::process::Command::new("/usr/bin/open").arg(path).spawn() {
                         Ok(_) => cx.quit(),
                         Err(error) => { self.error = Some(file_error(ui::OPEN_APP.get(), error)); cx.notify(); }
                     }
                 } else if self.error.is_some() {
-                    self.go(3, window, cx);
+                    self.go(3, cx);
                 }
             }
         }
@@ -338,15 +331,26 @@ fn thrown(index: usize) -> Pose {
 
 fn ease(t: f32) -> f32 { 1. - (1. - t.clamp(0., 1.)).powi(3) }
 
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0., 1.);
+    t * t * (3. - 2. * t)
+}
+
 fn card_pose(index: usize, page: usize, previous: usize, elapsed: f32, done: bool) -> Pose {
-    if done && index < page {
-        let angle = [-5_f32, -2.5, 2.5, 5.][index].to_radians();
-        let fan = Pose { x: 0., y: [-6., -16., -16., -6.][index], scale: 0.985, angle, alpha: 1. };
-        let delay = 0.06 * (page - 1 - index) as f32;
-        return if elapsed < 0.95 {
-            thrown(index).to(fan, ease((elapsed - delay) / 0.66))
+    if done {
+        let rest = stack(index, page - index);
+        if index == page { return rest; }
+        let fan = Pose {
+            x: [-25., -12., 12., 25.][index],
+            y: rest.y - 17.,
+            angle: [-5_f32, -2.5, 2.5, 5.][index].to_radians(),
+            ..rest
+        };
+        let half = DONE_DURATION / 2.;
+        return if elapsed < half {
+            Pose { alpha: 0., ..rest }.to(fan, smooth(elapsed / half))
         } else {
-            fan.to(stack(index, page - index), ease((elapsed - 0.95 - delay / 2.) / 0.5))
+            fan.to(rest, smooth((elapsed - half) / half))
         };
     }
     let target = if index < page { thrown(index) } else { stack(index, index - page) };
@@ -355,7 +359,7 @@ fn card_pose(index: usize, page: usize, previous: usize, elapsed: f32, done: boo
     } else if index < previous { thrown(index) } else { stack(index, index - previous) };
     let amount = if page == 0 && previous == 0 {
         ease((elapsed - 0.08 - 0.065 * (4 - index) as f32) / 0.5)
-    } else if done { 1. } else { ease(elapsed / 0.48) };
+    } else { ease(elapsed / PAGE_DURATION) };
     start.to(target, amount)
 }
 
@@ -373,13 +377,14 @@ fn draw_cards(window: &mut Window, cx: &mut App, titles: [&str; 5], page: usize,
         if pose.alpha < 0.004 { continue; }
         let place = pose.place();
         let (tab, right) = tabs[index];
-        let shadow_bounds = Bounds::new(place.pt(0., folder::T), size(px(CARD_W * pose.scale), px((CARD_H - folder::T) * pose.scale)));
-        let shadow = BoxShadow {
-            color: rgba(0x2a2620ff).into(), offset: point(px(0.), px(10.)), blur_radius: px(22.), spread_radius: px(0.),
-        };
-        let mut shadow = shadow;
-        shadow.color.a = pose.alpha * if index == page || index == 4 { 0.10 } else { 0.025 };
-        window.paint_shadows(shadow_bounds, Corners::all(px(20.)), &[shadow]);
+        if index == page {
+            let shadow_bounds = Bounds::new(place.pt(0., folder::T), size(px(CARD_W * pose.scale), px((CARD_H - folder::T) * pose.scale)));
+            let shadow = BoxShadow {
+                color: Hsla::from(rgb(0x2a2620)).opacity(pose.alpha * 0.10),
+                offset: point(px(0.), px(10.)), blur_radius: px(22.), spread_radius: px(0.),
+            };
+            window.paint_shadows(shadow_bounds, Corners::all(px(20.)), &[shadow]);
+        }
         paint_folder(window, &place, CARD_H, white(), rgba(0x3d3c38e6).into(), (tab, right), pose.alpha, (20., 20., 20., 20.));
         let mut color = ink();
         color.a = pose.alpha;
@@ -392,8 +397,11 @@ impl Render for Installer {
         if window.focused(cx).is_none() { window.focus(&self.focus); }
         let page = self.page;
         let previous = self.previous;
-        let elapsed = self.elapsed;
+        let elapsed = self.started.elapsed().as_secs_f32();
         let done = self.done.is_some();
+        let intro = page == 0 && previous == 0;
+        let duration = if done { DONE_DURATION } else if intro { INTRO_DURATION } else { PAGE_DURATION };
+        if self.working || elapsed < duration { window.request_animation_frame(); }
         let titles = ["Notedd", ui::THEME.get(), ui::SHORTCUT.get(), ui::FOLDERS.get(), if done { ui::DONE.get() } else { ui::INSTALLATION.get() }];
         let mut root = div().id("setup").size_full().relative().font_family("Geologica").track_focus(&self.focus).text_color(ink())
             .capture_key_down(cx.listener(|s, ev: &KeyDownEvent, w, cx| {
@@ -415,16 +423,14 @@ impl Render for Installer {
                     s.language_menu = false;
                     cx.notify();
                 } else if key == "escape" {
-                    if (1..=3).contains(&s.page) { s.go(s.page - 1, w, cx); } else { cx.quit(); }
+                    if (1..=3).contains(&s.page) { s.go(s.page - 1, cx); } else { cx.quit(); }
                 } else if key == "enter" {
                     s.advance(w, cx);
                 }
             }))
             .child(canvas(|_, _, _| (), move |_, _, window, cx| draw_cards(window, cx, titles, page, previous, elapsed, done)).absolute().size_full());
 
-        let reveal = if done {
-            ease((elapsed - 0.25) / 0.4)
-        } else if page == 0 && previous == 0 {
+        let reveal = if done { 1. } else if intro {
             ease((elapsed - 0.42) / 0.38)
         } else { ease((elapsed - 0.04) / 0.28) };
         let mut content = div().absolute().size_full().opacity(reveal);
@@ -544,11 +550,13 @@ impl Render for Installer {
             }
             _ if done => {
                 let (keys, width) = keycaps(self.prefs.keys[0], window);
-                content = content.child(centered(ui::DONE.get(), 120., 84., 68., FontWeight::BOLD, ink()))
-                    .child(centered(READY_HELP.get(), 212., 46., 16., FontWeight::NORMAL, muted()))
-                    .child(positioned((CARD_W - width) / 2., 280., width, 44.).opacity(ease((elapsed - 0.45) / 0.4)).child(keys));
+                let copy = smooth((elapsed - 0.12) / 0.32);
+                let lift = 8. * (1. - copy);
+                content = content.child(centered(ui::DONE.get(), 120. + lift, 84., 68., FontWeight::BOLD, ink()).opacity(copy))
+                    .child(centered(READY_HELP.get(), 212. + lift, 46., 16., FontWeight::NORMAL, muted()).opacity(copy))
+                    .child(positioned((CARD_W - width) / 2., 280., width, 44.).opacity(smooth((elapsed - 0.26) / 0.32)).child(keys));
                 if let Some(error) = &self.error {
-                    content = content.child(label(error.clone(), PAD, 358., 528., 13., FontWeight::NORMAL, rgb(0xa03d35).into()));
+                    content = content.child(label(error.clone(), PAD, 358., 528., 13., FontWeight::NORMAL, rgb(0xa03d35).into()).opacity(copy));
                 }
             }
             _ if self.working => {
@@ -562,12 +570,13 @@ impl Render for Installer {
                     .child(label(self.error.clone().unwrap_or_default(), PAD, TOP + 48., 528., 15., FontWeight::NORMAL, muted()));
             }
         }
-        if !self.working {
+        if !self.working && (!done || elapsed >= DONE_ACTIONS_DELAY) {
+            let actions = if done { smooth((elapsed - DONE_ACTIONS_DELAY) / 0.32) } else { 1. };
             let secondary = if done { ui::CLOSE.get() } else { ui::BACK.get() };
             if page > 0 {
-                content = content.child(button("back", secondary, 36., BUTTON_Y - OY, 108., Button::Quiet, |s, w, cx| {
-                    if s.done.is_some() { cx.quit(); } else { s.go(s.page - 1, w, cx); }
-                }, cx));
+                content = content.child(button("back", secondary, 36., BUTTON_Y - OY, 108., Button::Quiet, |s, _, cx| {
+                    if s.done.is_some() { cx.quit(); } else { s.go(s.page - 1, cx); }
+                }, cx).opacity(actions));
             }
             let next = match page {
                 0 => ui::GET_STARTED.get(), 1 | 2 => ui::NEXT.get(), 3 => ui::INSTALL.get(),
@@ -575,11 +584,11 @@ impl Render for Installer {
             };
             let width = folder::text_width(window, next, 15., FontWeight::MEDIUM).ceil() + 56.;
             content = content.child(button("next", next, CARD_W - PAD + 8. - width, BUTTON_Y - OY, width, Button::Primary,
-                |s, w, cx| s.advance(w, cx), cx));
+                |s, w, cx| s.advance(w, cx), cx).opacity(actions));
             content = content.child(positioned(CARD_W - 40., 4., 26., 26.).id("close").rounded(px(13.))
                 .border_1().border_color(rgba(0x3d3c38e6)).bg(white()).hover(|s| s.bg(rgb(0xf4f1ea)))
                 .flex().items_center().justify_center().cursor_pointer().text_color(muted()).child("×")
-                .on_click(|_, _, cx| cx.quit()));
+                .opacity(actions).on_click(|_, _, cx| cx.quit()));
         }
         root = root.child(positioned(0., 0., CARD_W, folder::T).on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()));
         root.child(content)
@@ -623,7 +632,7 @@ fn main() {
                     }
                 }
             }
-            let view=cx.new(Installer::new); view.update(cx,|s,cx|s.go(0,window,cx)); view
+            cx.new(Installer::new)
         }).expect("open setup");
         cx.on_window_closed(|cx| if cx.windows().is_empty() { cx.quit(); }).detach();
     });

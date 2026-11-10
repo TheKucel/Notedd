@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      build_macos:
+        description: Build the macOS installer
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -47,6 +52,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    if: github.event_name != 'workflow_dispatch' || inputs.build_macos
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
