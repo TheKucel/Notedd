@@ -814,9 +814,13 @@ impl Render for Editor {
             .on_action(cx.listener(|e, _: &Delete, w, cx| { e.core.delete_forward(); e.changed(w, cx); }))
             .on_action(cx.listener(|e, _: &DeleteWordBack, w, cx| { e.core.delete_word_back(); e.changed(w, cx); }))
             .on_action(cx.listener(|e, _: &DeleteLineBack, w, cx| {
+                if e.core.collapsed() {
+                    if !e.fresh() { return; }
+                    e.line_edge(false, true, w, cx);
+                }
                 e.marked = None;
-                if e.core.collapsed() { e.line_edge(false, true, w, cx); }
-                if e.core.delete_selection() { e.changed(w, cx); }
+                if !e.core.delete_selection() { e.core.backspace(); }
+                e.changed(w, cx);
             }))
             .on_action(cx.listener(|e, _: &Enter, w, cx| { if e.single { cx.emit(EditorEvent::Submit); return; } e.marked = None; e.core.enter(); e.changed(w, cx); }))
             .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(EditorEvent::Cancel)))
