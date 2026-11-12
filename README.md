@@ -6,6 +6,12 @@
   <p><a href="https://github.com/TheKucel/Notedd/releases">Download</a> · <a href="#shortcuts">Shortcuts</a> · <a href="#building-it">Build from source</a></p>
 </div>
 
+
+
+https://github.com/user-attachments/assets/0ab54e89-d80b-4c41-917d-c431e6d59e8e
+
+
+
 ---
 
 I wanted a little notes window I could pull up while doing something else. So that's what this is. Hit `Ctrl+Alt+Space`, write whatever, hit it again to hide it.
