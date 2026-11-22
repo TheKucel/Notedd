@@ -66,9 +66,14 @@ impl Scene {
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
-        let clipped_bounds = primitive
-            .bounds()
-            .intersect(&primitive.content_mask().bounds);
+        let bounds = match &primitive {
+            // Use the painted footprint for clipping and layer ordering.
+            Primitive::PolychromeSprite(sprite) if sprite.transformation != TransformationMatrix::unit() => {
+                sprite.transformation.enclosing_bounds(sprite.bounds)
+            }
+            _ => *primitive.bounds(),
+        };
+        let clipped_bounds = bounds.intersect(&primitive.content_mask().bounds);
 
         if clipped_bounds.is_empty() {
             return;
@@ -607,6 +612,21 @@ impl TransformationMatrix {
             }
         }
         Point::new(output[0].into(), output[1].into())
+    }
+
+    fn enclosing_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        let transform = |point: Point<ScaledPixels>| {
+            self.apply(point.map(|value| Pixels(value.0)))
+                .map(|value| ScaledPixels(value.0))
+        };
+        let first = transform(bounds.origin);
+        let (mut min, mut max) = (first, first);
+        for corner in [bounds.top_right(), bounds.bottom_left(), bounds.bottom_right()] {
+            let corner = transform(corner);
+            min = min.min(&corner);
+            max = max.max(&corner);
+        }
+        Bounds::from_corners(min, max)
     }
 }
 

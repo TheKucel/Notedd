@@ -3,6 +3,19 @@ use crate::locale::Message;
 
 pub const SETTINGS: Message = Message("Settings", "Настройки", "设置");
 pub const GENERAL: Message = Message("General", "Общие", "常规");
+pub const UPDATE_CHECK: Message = Message("Check for updates", "Проверить обновления", "检查更新");
+pub const UPDATE_CHECKING: Message = Message("Checking…", "Проверяю…", "正在检查…");
+pub const UPDATE_CURRENT: Message = Message("Notedd is up to date", "Установлена последняя версия Notedd", "Notedd 已是最新版本");
+pub const UPDATE_CHECK_FAILED: Message = Message("Could not check for updates", "Не удалось проверить обновления", "无法检查更新");
+pub const UPDATE_INSTALL: Message = Message("Install", "Установить", "安装");
+pub const UPDATE_DOWNLOAD: Message = Message("Download", "Скачать", "下载");
+pub const UPDATE_RELEASE: Message = Message("Open release", "Открыть релиз", "打开发布页");
+#[cfg(any(target_os = "macos", windows))]
+pub const UPDATE_DOWNLOADING: Message = Message("Downloading installer…", "Скачиваю установщик…", "正在下载安装程序…");
+#[cfg(any(target_os = "macos", windows))]
+pub const UPDATE_INSTALL_FAILED: Message = Message("Could not open the update installer", "Не удалось запустить установщик обновления", "无法打开更新安装程序");
+#[cfg(any(target_os = "macos", windows))]
+pub const UPDATE_INSTALLER_OPENED: Message = Message("Installer opened", "Установщик открыт", "已打开安装程序");
 pub const SHORTCUTS: Message = Message("Shortcuts", "Сочетания клавиш", "快捷键");
 pub const COLORS: Message = Message("Colors", "Цвета", "颜色");
 pub const LANGUAGE: Message = Message("Language", "Язык", "语言");

@@ -14,6 +14,7 @@ use crate::settings::{self, Prefs, DEFAULT_CARDS, KEYS, MAX_CARDS};
 use crate::strings as ui;
 use crate::system::{self, Cmd};
 use crate::theme::{c, theme_kind, AppTheme};
+use crate::updater;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use notedd_core::store::{self, Note};
@@ -100,6 +101,7 @@ pub struct Shell {
     focus: FocusHandle,
     win: Win,
     st: setui::SetState,
+    update: updater::State,
     emenu: Option<emenu::EMenu>,
     rsz: Option<(usize, (i32, i32), (i32, i32, i32, i32))>,
     ctl_open: bool,
@@ -154,6 +156,8 @@ fn bind_keys(cx: &mut App, p: &Prefs) {
     cx.bind_keys([
         KeyBinding::new("secondary-=", ZoomIn, s),
         KeyBinding::new("secondary-shift-=", ZoomIn, s),
+        #[cfg(target_os = "windows")]
+        KeyBinding::new("secondary-+", ZoomIn, s),
         KeyBinding::new("secondary--", ZoomOut, s),
         KeyBinding::new("secondary-0", ZoomReset, s),
         KeyBinding::new("escape", Escape, s),
@@ -227,7 +231,7 @@ impl Shell {
             find_open: false, palette: false, pal_id: String::new(), pal_at: (0., 0.), pal_t: Ease::at(0.), pal_sc: [Ease::at(1.); MAX_CARDS], pal_hover: None, pal_prev: false, sel: 0, page: 0, capture: None,
             toast: None, toast_gen: 0, deleted: None, dirty: false, saver: None, focus,
             win: Win::of(window).unwrap_or_default(),
-            st: setui::SetState::new(), emenu: None, rsz: None,
+            st: setui::SetState::new(), update: updater::State::default(), emenu: None, rsz: None,
             ctl_open: false, hover_plus: false, tab_hover: false, ctl_last: Vec::new(), ctl_prev: Vec::new(), hover_ctl: None, list_start: 0, edit_h: 560.,
             mo: Motion::new(560.),
         };
@@ -344,6 +348,11 @@ impl Shell {
 
     fn open_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.save_now(cx);
+        if self.mode == Mode::List {
+            // Keep the selected folder's position and discard the rest of the stack.
+            self.mo.anims.retain(|card_id, _| card_id == id);
+            self.mo.swap_out = None;
+        }
         if id != self.cur { let leaving = self.cur.clone(); self.cur = id.to_string(); self.drop_empty(&self.cur.clone()); let _ = leaving; }
         let now = store::now_ft();
         if let Some(i) = self.idx(id) { self.notes[i].opened = now; }
@@ -615,6 +624,76 @@ impl Shell {
         self.save_now(cx);
         system::remove_tray();
         cx.quit();
+    }
+
+    fn update_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.update {
+            updater::State::Checking => return,
+            #[cfg(any(target_os = "macos", windows))]
+            updater::State::Downloading => return,
+            updater::State::Available(update) => {
+                #[cfg(any(target_os = "macos", windows))]
+                if update.can_install() {
+                    self.install_update(update.clone(), window, cx);
+                    return;
+                }
+                cx.open_url(&update.download_url().unwrap_or_else(|| update.release_url()));
+                return;
+            }
+            updater::State::Idle => {}
+        }
+        self.update = updater::State::Checking;
+        let task = cx.background_spawn(async { updater::check() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |shell, window, cx| match result {
+                Ok(Some(update)) => {
+                    shell.update = updater::State::Available(update);
+                    cx.notify();
+                }
+                result => {
+                    shell.update = updater::State::Idle;
+                    let message = if let Err(error) = result {
+                        dbg_log(&format!("Update check failed: {error}"));
+                        ui::UPDATE_CHECK_FAILED
+                    } else {
+                        ui::UPDATE_CURRENT
+                    };
+                    shell.show_toast(message.get(), window, cx);
+                }
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    fn install_update(&mut self, update: updater::Update, window: &mut Window, cx: &mut Context<Self>) {
+        self.update = updater::State::Downloading;
+        let task = cx.background_spawn(async move {
+            let result = updater::download_installer(&update);
+            (update, result)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let (update, result) = task.await;
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.update = updater::State::Available(update);
+                let launched = result.and_then(|(dir, installer)| {
+                    shell.save_now(cx);
+                    updater::open_installer(&installer)?;
+                    let _ = dir.keep();
+                    Ok(())
+                });
+                if let Err(error) = launched {
+                    dbg_log(&format!("Update installer failed: {error}"));
+                    shell.show_toast(ui::UPDATE_INSTALL_FAILED.get(), window, cx);
+                } else if cfg!(target_os = "macos") {
+                    shell.quit(cx);
+                } else {
+                    shell.show_toast(ui::UPDATE_INSTALLER_OPENED.get(), window, cx);
+                }
+            });
+        }).detach();
+        cx.notify();
     }
 
     /// starts sizing from one edge: the window follows the pointer until the button goes up
@@ -1147,7 +1226,7 @@ impl Shell {
             .size_full()
             .relative()
             .on_mouse_down(MouseButton::Left, cx.listener(|s, _, w, cx| { if !s.focus.contains_focused(w, cx) { w.focus(&s.focus); } }))
-            .key_context("Shell")
+            .key_context(if self.capture.is_some() { "ShortcutCapture" } else { "Shell" })
             .track_focus(&self.focus)
             .text_color(c(th.ink))
             .font_family(crate::layout::BODY)

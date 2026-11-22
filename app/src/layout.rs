@@ -244,8 +244,12 @@ impl Layout {
         if b.lines.is_empty() { return Pos::new(i, 0); }
         let ry = y - b.y - b.top;
         let l = b.lines.iter().rev().find(|l| ry >= l.y).unwrap_or(&b.lines[0]);
+        let lh = px(b.m.lh);
         let pt = point(px(x - b.x), px((ry - l.y).max(0.)));
-        let ix = l.shaped.closest_index_for_position(pt, px(b.m.lh)).unwrap_or_else(|e| e);
+        if pt.y >= l.shaped.size(lh).height {
+            return Pos::new(i, l.start + l.shaped.len());
+        }
+        let ix = l.shaped.closest_index_for_position(pt, lh).unwrap_or_else(|e| e);
         Pos::new(i, l.start + ix.min(l.shaped.len()))
     }
 
@@ -271,5 +275,35 @@ impl Layout {
         while y < y2 - 1. { out.push((bb.x, y, right - bb.x, lh)); y += lh; }
         out.push((bb.x, y2, (x2 - bb.x + edge).max(0.), lh));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{metrics, BlockBox, Layout, Line};
+    use gpui::{px, LineLayout, WrappedLine};
+    use notedd_editor::model::{Kind, Pos};
+    use std::sync::Arc;
+
+    #[test]
+    fn point_below_last_line_maps_to_document_end() {
+        let text = "Last sentence";
+        let mut shaped = WrappedLine::default();
+        Arc::get_mut(&mut *shaped).unwrap().unwrapped_layout = Arc::new(LineLayout {
+            len: text.len(),
+            width: px(100.),
+            ..Default::default()
+        });
+        let m = metrics(&Kind::Para, 0);
+        let layout = Layout {
+            blocks: vec![BlockBox {
+                y: 0., h: m.lh, x: 0., w: 100., m, top: 0., img: None,
+                lines: vec![Line { start: 0, y: 0., shaped }],
+            }],
+            ..Default::default()
+        };
+        let end = Pos::new(0, text.len());
+        let (x, y, lh) = layout.point_of(end);
+        assert_eq!(layout.pos_at(x, y + lh * 1.5), end);
     }
 }

@@ -12,6 +12,7 @@ mod shell;
 mod strings;
 mod system;
 mod theme;
+mod updater;
 
 use gpui::*;
 

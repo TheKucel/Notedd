@@ -228,10 +228,9 @@ pub fn key_to_vk(key: &str) -> Option<u32> {
     }
 }
 
-// GPUI represents Shift+punctuation on macOS as the resulting character, without
-// the Shift modifier. Store the underlying key and Shift for the settings UI and
-// global hotkey registration, then reverse the mapping for local GPUI bindings.
-#[cfg(target_os = "macos")]
+// GPUI represents shifted symbols on macOS and Windows as the resulting
+// character. Store the underlying key and Shift for settings and global hotkeys.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const SHIFTED_KEYS: &[(u32, &str)] = &[
     (0xDE, "\""), (0xBA, ":"), (0xBC, "<"), (0xBE, ">"),
     (0xBD, "_"), (0xBB, "+"), (0xBF, "?"), (0xC0, "~"),
@@ -241,7 +240,7 @@ const SHIFTED_KEYS: &[(u32, &str)] = &[
 ];
 
 pub fn shortcut_key(key: &str, mods: u32) -> Option<(u32, u32)> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Some(&(vk, _)) = SHIFTED_KEYS.iter().find(|(_, shifted)| *shifted == key) {
         return Some((mods | 4, vk));
     }
@@ -253,7 +252,7 @@ pub fn binding(mods: u32, vk: u32) -> Option<String> {
     let mut key = vk_to_key(vk)?;
     #[allow(unused_mut)]
     let mut mods = mods;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if mods & 4 != 0 {
         if let Some((_, shifted)) = SHIFTED_KEYS.iter().find(|(code, _)| *code == vk) {
             key = (*shifted).to_string();
@@ -300,15 +299,20 @@ pub fn cmd_label(rest: &str) -> String {
     join(parts)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 mod tests {
     use super::*;
 
     #[test]
     fn shifted_quote_round_trips_for_local_and_global_shortcuts() {
-        let (mods, vk) = shortcut_key("\"", 8).unwrap();
-        assert_eq!((mods, vk), (12, 0xDE));
-        assert_eq!(binding(mods, vk).as_deref(), Some("super-\""));
+        let (modifier, expected_binding) = if cfg!(target_os = "windows") {
+            (2, "ctrl-\"")
+        } else {
+            (8, "super-\"")
+        };
+        let (mods, vk) = shortcut_key("\"", modifier).unwrap();
+        assert_eq!((mods, vk), (modifier | 4, 0xDE));
+        assert_eq!(binding(mods, vk).as_deref(), Some(expected_binding));
         assert!(hotkey(mods, vk).is_some());
     }
 }

@@ -53,6 +53,8 @@ These bindings are for Windows and Linux. On macOS, `Command` takes the place of
 
 You can change the bindings under **Settings → Shortcuts**. Settings also has themes and a language picker for English, Russian, and Simplified Chinese.
 
+See the installed version under **Settings → General** and select **Check for updates**. When an update is available, Notedd can open the installer on Windows and macOS or download the archive on Linux.
+
 ## Where the notes go
 
 Each note is a Markdown file. The first line is the title. They go in `Documents\Notedd` by default, and you can pick another folder in Settings. On Windows, app settings live in `%APPDATA%\Notedd\settings.txt`.

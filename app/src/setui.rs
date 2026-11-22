@@ -14,7 +14,7 @@ const SET_LABEL: f32 = 170.0;
 const GRIP: f32 = 7.0;
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
-pub enum Row { Page, Language, Editor, Theme, Scale, Dir, Far, Speed, Auto, Notes, Key(usize), Ink, Accent, Cards, Reset }
+pub enum Row { Page, Update, Language, Editor, Theme, Scale, Dir, Far, Speed, Auto, Notes, Key(usize), Ink, Accent, Cards, Reset }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Pick { Ink, Accent, Card(usize) }
@@ -29,7 +29,7 @@ fn seg(text: impl Into<String>, on: bool) -> Seg { Seg { text: text.into(), on, 
 enum Style { Choice, Step, Keys, Swatches, Button }
 
 fn style(r: Row) -> Style {
-    match r { Row::Scale => Style::Step, Row::Key(_) => Style::Keys, Row::Cards => Style::Swatches, Row::Reset | Row::Notes => Style::Button, _ => Style::Choice }
+    match r { Row::Scale => Style::Step, Row::Key(_) => Style::Keys, Row::Cards => Style::Swatches, Row::Reset | Row::Notes | Row::Update => Style::Button, _ => Style::Choice }
 }
 
 type Rc4 = [f32; 4]; // left, top, right, bottom
@@ -222,9 +222,11 @@ fn paint_rows(sd: &SetDraw, rows: &[RowG], first: usize, p: &Place, window: &mut
                     }
                 }
                 Style::Button => {
-                    if hover { rq(window, p, *rc, hh / 2., Some(al(ink, 0.08 * o)), None, false); }
-                    rq(window, p, *rc, hh / 2., None, Some((1., al(line, 0.4 * o))), false);
-                    txt(window, cx, p, &s.text, rc[0] + 15., my, 13., FontWeight::NORMAL, al(ink, o), rc[2] + 4. - rc[0] - 15.);
+                    if !s.value {
+                        if hover { rq(window, p, *rc, hh / 2., Some(al(ink, 0.08 * o)), None, false); }
+                        rq(window, p, *rc, hh / 2., None, Some((1., al(line, 0.4 * o))), false);
+                    }
+                    txt(window, cx, p, &s.text, rc[0] + 15., my, 13., FontWeight::NORMAL, al(if s.value { ink2 } else { ink }, o), rc[2] + 4. - rc[0] - 15.);
                 }
             }
             if sd.focus == Some((r, k)) {
@@ -353,6 +355,19 @@ impl Shell {
         let glyph = |g: u8| Seg { glyph: g, ..seg("", false) };
         match page {
             0 => {
+                let (update_label, busy) = match &self.update {
+                    updater::State::Idle => (ui::UPDATE_CHECK.get().to_string(), false),
+                    updater::State::Checking => (ui::UPDATE_CHECKING.get().to_string(), true),
+                    #[cfg(any(target_os = "macos", windows))]
+                    updater::State::Downloading => (ui::UPDATE_DOWNLOADING.get().to_string(), true),
+                    updater::State::Available(update) => {
+                        let label = if update.can_install() { ui::UPDATE_INSTALL }
+                            else if update.download_url().is_some() { ui::UPDATE_DOWNLOAD }
+                            else { ui::UPDATE_RELEASE };
+                        (format!("{} {}", label.get(), update.version), false)
+                    }
+                };
+                rows.push((format!("Notedd {}", updater::CURRENT), Row::Update, vec![Seg { value: busy, ..seg(update_label, false) }]));
                 let mut languages = vec![seg(ui::SYSTEM_LANGUAGE.get(), p.language.is_none())];
                 languages.extend(Language::ALL.iter().map(|l| seg(l.name(), p.language == Some(*l))));
                 rows.push((ui::LANGUAGE.get().into(), Row::Language, languages));
@@ -579,6 +594,7 @@ impl Shell {
         let mut demo = false;
         match *row {
             Row::Page => { self.page = i; self.st.fade = Ease::at(0.); self.st.fade.to = 1.; self.st.scroll = 0.0; self.st.scroll_to = 0.0; self.st.pick = None; self.end_capture(); self.st.focus = (0, i); cx.notify(); return; }
+            Row::Update => { self.update_action(window, cx); return; }
             Row::Language => p.language = if i == 0 { None } else { Some(Language::ALL[i - 1]) },
             Row::Editor => p.simple_editor = i == 1,
             Row::Theme => { p.theme = i as u8; self.st.pick = None; }
